@@ -1,0 +1,83 @@
+"""Middleware for VESPER context assembly.
+
+Replaces DeerFlow's default system prompt with VESPER's assembled context
+before each model call. Injects: SOUL.md + datetime + projects + events + memories.
+Also enforces a rolling message window of last 25 messages.
+"""
+
+import logging
+from typing import override
+
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import SystemMessage
+from langgraph.runtime import Runtime
+
+logger = logging.getLogger(__name__)
+
+# Max non-system messages to keep in context (VESPER-4: raised from 10 to 25)
+MAX_MESSAGE_WINDOW = 25
+
+
+class VesperContextState(AgentState):
+    """Compatible with ThreadState schema."""
+    pass
+
+
+class VesperContextMiddleware(AgentMiddleware[VesperContextState]):
+    """Assembles and injects VESPER context before each model call.
+
+    Replaces the static system prompt with dynamically assembled context:
+    SOUL.md + datetime + Postgres projects/tasks + events + Mem0 memories.
+    Also trims message history to last 25 messages for token efficiency.
+    """
+
+    state_schema = VesperContextState
+
+    @override
+    def before_model(self, state: VesperContextState, runtime: Runtime) -> dict | None:
+        """Assemble context and replace system message before LLM call."""
+        try:
+            from vesper_context import assemble_context
+
+            # Get the latest user message for memory search
+            messages = state.get("messages", [])
+            user_message = ""
+            for msg in reversed(messages):
+                if getattr(msg, "type", None) == "human":
+                    content = getattr(msg, "content", "")
+                    if isinstance(content, list):
+                        user_message = " ".join(
+                            p.get("text", "") for p in content if isinstance(p, dict)
+                        )
+                    else:
+                        user_message = str(content)
+                    break
+
+            if not user_message:
+                return None
+
+            # Assemble context
+            context = assemble_context(user_message)
+
+            # Debug: dump full assembled context for inspection
+            logger.debug(f"VESPER FULL CONTEXT ({len(context)} chars): {context[:500]}...")
+
+            # Separate system and non-system messages
+            non_system = []
+            for msg in messages:
+                if getattr(msg, "type", None) != "system":
+                    non_system.append(msg)
+
+            # Trim to last MAX_MESSAGE_WINDOW non-system messages
+            if len(non_system) > MAX_MESSAGE_WINDOW:
+                non_system = non_system[-MAX_MESSAGE_WINDOW:]
+
+            # Replace system message with assembled context
+            new_messages = [SystemMessage(content=context)] + non_system
+
+            return {"messages": new_messages}
+
+        except Exception as e:
+            logger.error(f"VesperContextMiddleware failed: {e}", exc_info=True)
+            return None

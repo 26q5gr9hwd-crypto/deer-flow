@@ -1,0 +1,575 @@
+"""
+VESPER Consolidation Agent - Phase 2
+Runs periodically to distill accumulated Graphiti knowledge into SKILL.md files.
+Design doc: Section 5.3C, 10.5
+
+Key facts (discovered during VESPER-28):
+- get_graphiti_client() is SYNC - uses _run_async internally, do NOT await it
+- Skills live at /opt/deer-flow/skills/custom/ (NOT backend/skills/custom/)
+- Loader scans skills/custom/_dynamic/ automatically (dirs starting with _ are fine)
+- Use search_memories() from vesper_graphiti - NOT g.search(config=...) directly
+  (the config= kwarg isn't supported when calling g.search() standalone)
+- LLM: openai/gpt-oss-120b via OpenRouter
+
+v2.0 changes (VESPER-29):
+- Added Step 8: run_confidence_update_cycle() called after writing new skills
+
+v2.1 changes (VESPER-31):
+- Added Step 9: run_entity_consolidation() for neighborhood-aware entity summaries
+
+v2.2 changes (VESPER-32):
+- Added Step 10: run_community_detection() for topic cluster summaries (weekly)
+
+v2.3 changes (VESPER-34):
+- Added Step 11: cross_domain_transfer() for general principle promotion
+  Scans _dynamic/ skills, finds principles recurring across 3+ domains,
+  promotes them to vesper-general/SKILL.md. SkillRL general_skills pattern.
+"""
+import json
+import logging
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+import pathlib
+from dotenv import load_dotenv
+
+# Load .env
+_env_path = pathlib.Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    _env_path2 = pathlib.Path(__file__).resolve().parent / ".env"
+    if _env_path2.exists():
+        load_dotenv(_env_path2)
+    else:
+        load_dotenv()
+
+# Add backend dir to sys.path for vesper_graphiti import
+_backend_dir = pathlib.Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+logging.basicConfig(level=logging.INFO, format='[consolidation] %(message)s')
+logger = logging.getLogger(__name__)
+
+# Correct paths - skills at /opt/deer-flow/skills/, not backend/skills/
+DEERFLOW_DIR = Path("/opt/deer-flow")
+SKILLS_CUSTOM_DIR = DEERFLOW_DIR / "skills" / "custom"
+SKILLS_DYNAMIC_DIR = SKILLS_CUSTOM_DIR / "_dynamic"
+SKILLS_GENERAL_SKILL_PATH = SKILLS_CUSTOM_DIR / "vesper-general" / "SKILL.md"
+
+MAX_NEW_SKILLS_PER_CYCLE = 3
+MIN_EPISODES_FOR_DISTILLATION = 5
+SIMILARITY_THRESHOLD = 0.85
+
+
+def load_existing_skill_descriptions():
+    """Walk skills/custom/ and read YAML frontmatter from all SKILL.md files."""
+    skills = []
+    for skill_md in SKILLS_CUSTOM_DIR.rglob("SKILL.md"):
+        try:
+            content = skill_md.read_text()
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end > 0:
+                    fm = content[3:end].strip()
+                    name_match = re.search(r'^name:\s*(.+)$', fm, re.MULTILINE)
+                    desc_match = re.search(
+                        r'^description:\s*(.+?)(?=\n\w|\Z)', fm,
+                        re.MULTILINE | re.DOTALL
+                    )
+                    if name_match:
+                        name = name_match.group(1).strip().strip('"\'')
+                    else:
+                        name = skill_md.parent.name
+                    desc = desc_match.group(1).strip() if desc_match else ""
+                    desc = re.sub(r'\s+', ' ', desc).strip('"\'')
+                    skills.append({"name": name, "description": desc, "path": str(skill_md)})
+        except Exception as e:
+            logger.warning("Could not read %s: %s", skill_md, e)
+    return skills
+
+
+def word_overlap_ratio(text1, text2):
+    """Simple Jaccard word overlap ratio."""
+    words1 = set(re.findall(r'\w+', text1.lower()))
+    words2 = set(re.findall(r'\w+', text2.lower()))
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / len(words1 | words2)
+
+
+def is_duplicate_skill(new_description, existing_skills):
+    """Return True if new skill is too similar to any existing skill."""
+    for existing in existing_skills:
+        ratio = word_overlap_ratio(new_description, existing.get("description", ""))
+        if ratio > SIMILARITY_THRESHOLD:
+            logger.info("Skill similar to '%s' (overlap=%.2f), skipping", existing['name'], ratio)
+            return True
+    return False
+
+
+def write_skill_md(skill_name, description, content, domain):
+    """Write a new SKILL.md to _dynamic/ folder."""
+    safe_name = re.sub(r'[^a-z0-9-]', '-', skill_name.lower()).strip('-')
+    safe_name = re.sub(r'-+', '-', safe_name)
+    skill_dir = SKILLS_DYNAMIC_DIR / safe_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+
+    desc_escaped = description.replace('"', '\\"')
+    frontmatter = (
+        "---\n"
+        "name: " + safe_name + "\n"
+        "description: \"" + desc_escaped + "\"\n"
+        "domain: " + domain + "\n"
+        "generated_by: vesper-consolidation-agent\n"
+        "generated_at: " + datetime.utcnow().isoformat() + "\n"
+        "version: 1\n"
+        "---\n"
+    )
+    skill_path.write_text(frontmatter + content)
+    logger.info("Written skill: %s", skill_path)
+    return skill_path
+
+
+def call_llm(messages):
+    """Call LLM using OpenAI client (gpt-oss-120b via OpenRouter)."""
+    from openai import OpenAI
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    model = os.environ.get("VESPER_LLM_MODEL", "openai/gpt-oss-120b")
+    base_url = os.environ.get("VESPER_LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=2000,
+    )
+    return response.choices[0].message.content
+
+
+# JSON templates as plain string constants (NOT f-strings) so Notion
+# does not strip the curly braces during page storage.
+_PASS1_TEMPLATE = (
+    "{\n"
+    '  "skill_name": "general-operating-principles",\n'
+    '  "description": "Comprehensive description covering when to use these principles. Include specific task types and scenarios.",\n'
+    '  "domain": "general",\n'
+    '  "principles": [\n'
+    '    {"title": "3-5 word title", "principle": "1-2 sentence actionable principle.", "when_to_apply": "Specific scenario."}\n'
+    "  ]\n"
+    "}"
+)
+
+_PASS2_TEMPLATE = (
+    "{\n"
+    '  "skill_name": "DOMAIN-best-practices",\n'
+    '  "description": "Domain-specific skills. Use when working on DOMAIN tasks. Include specific scenarios.",\n'
+    '  "domain": "DOMAIN",\n'
+    '  "principles": [\n'
+    '    {"title": "Short title", "principle": "Actionable principle.", "when_to_apply": "Scenario."}\n'
+    "  ]\n"
+    "}"
+)
+
+_PASS3_TEMPLATE = (
+    "{\n"
+    '  "skill_name": "mistakes-to-avoid",\n'
+    '  "description": "Common agent mistakes and concrete better alternatives. Use when making decisions, handling errors, writing code, or managing infrastructure.",\n'
+    '  "domain": "general",\n'
+    '  "mistakes": [\n'
+    '    {"mistake": "Description.", "why_bad": "Why problematic.", "better_approach": "What to do instead."}\n'
+    "  ]\n"
+    "}"
+)
+
+_CROSS_DOMAIN_TEMPLATE = (
+    "[\n"
+    '  {"title": "3-5 word title", "principle": "1-2 sentence principle.", "when_to_apply": "Scenario."}\n'
+    "]"
+)
+
+
+def _parse_json_from_llm(text):
+    """Extract and parse JSON from LLM response, stripping markdown fences."""
+    text = re.sub(r'^```[a-z]*\n?', '', text.strip())
+    text = re.sub(r'\n?```$', '', text.strip())
+    m = re.search(r'\{.*\}', text, re.DOTALL)
+    if m:
+        return json.loads(m.group())
+    return None
+
+
+def distill_skills(episodes_text, corrections_text, domain, existing_skills):
+    """SkillRL-inspired 3-pass distillation. Returns list of proposal dicts."""
+    proposals = []
+
+    # Pass 1 - General principles
+    p1 = (
+        "Here are memory episodes from VESPER (a personal AI assistant for Daniel):\n\n"
+        + episodes_text[:3000]
+        + "\n\nExtract 3-5 general principles that would help VESPER perform better across all tasks.\n"
+        "Each principle: title (3-5 words), principle (1-2 sentences), when_to_apply.\n\n"
+        "Return ONLY valid JSON (no extra text, no markdown fences):\n"
+        + _PASS1_TEMPLATE
+    )
+    try:
+        raw = call_llm([{"role": "user", "content": p1}])
+        proposal = _parse_json_from_llm(raw)
+        if proposal and "skill_name" in proposal and "description" in proposal:
+            proposals.append(proposal)
+            logger.info("Pass 1 produced skill: %s", proposal.get('skill_name'))
+    except Exception as e:
+        logger.warning("Pass 1 failed: %s", e)
+
+    # Pass 2 - Domain skills (non-general domains only)
+    if domain and domain != "general":
+        p2_template = _PASS2_TEMPLATE.replace("DOMAIN", domain)
+        p2 = (
+            "Here are memory episodes about " + domain + " from VESPER:\n\n"
+            + episodes_text[:3000]
+            + "\n\nExtract 3-5 domain-specific skills for " + domain + " tasks.\n"
+            "Same format as before: title, principle, when_to_apply.\n\n"
+            "Return ONLY valid JSON (no extra text, no markdown fences):\n"
+            + p2_template
+        )
+        try:
+            raw = call_llm([{"role": "user", "content": p2}])
+            proposal = _parse_json_from_llm(raw)
+            if proposal and "skill_name" in proposal and "description" in proposal:
+                if not any(p.get("skill_name") == proposal.get("skill_name") for p in proposals):
+                    proposals.append(proposal)
+                    logger.info("Pass 2 produced skill: %s", proposal.get('skill_name'))
+        except Exception as e:
+            logger.warning("Pass 2 failed: %s", e)
+
+    # Pass 3 - Mistakes to avoid (only if corrections exist)
+    if corrections_text.strip():
+        p3 = (
+            "Here are corrections and failures from VESPER's memory:\n\n"
+            + corrections_text[:2000]
+            + "\n\nExtract 3-5 common mistakes and how to avoid them.\n\n"
+            "Return ONLY valid JSON (no extra text, no markdown fences):\n"
+            + _PASS3_TEMPLATE
+        )
+        try:
+            raw = call_llm([{"role": "user", "content": p3}])
+            proposal = _parse_json_from_llm(raw)
+            if proposal and "skill_name" in proposal and "description" in proposal:
+                proposals.append(proposal)
+                logger.info("Pass 3 produced skill: %s", proposal.get('skill_name'))
+        except Exception as e:
+            logger.warning("Pass 3 failed: %s", e)
+
+    return proposals
+
+
+def format_skill_body(proposal):
+    """Convert a skill proposal dict into SKILL.md body markdown."""
+    lines = []
+    raw_name = proposal.get("skill_name", "generated-skill")
+    heading = raw_name.replace("-", " ").title()
+    lines.append("# " + heading + "\n")
+
+    if "principles" in proposal:
+        lines.append("## Principles\n")
+        for p in proposal.get("principles", []):
+            lines.append("### " + p.get("title", "Principle"))
+            lines.append(p.get("principle", ""))
+            when = p.get("when_to_apply", "")
+            if when:
+                lines.append("\n*When to apply:* " + when + "\n")
+
+    if "mistakes" in proposal:
+        lines.append("## Mistakes to Avoid\n")
+        for m in proposal.get("mistakes", []):
+            lines.append("### " + m.get("mistake", "Mistake"))
+            if m.get("why_bad"):
+                lines.append("**Why bad:** " + m["why_bad"])
+            if m.get("better_approach"):
+                lines.append("**Better approach:** " + m["better_approach"] + "\n")
+
+    lines.append(
+        "\n*Auto-generated by VESPER Consolidation Agent - "
+        + datetime.utcnow().isoformat() + " UTC*"
+    )
+    return "\n".join(lines)
+
+
+def detect_domain(text):
+    """Keyword heuristic to detect the dominant domain in episode text."""
+    domain_kw = {
+        "infrastructure": ["docker", "container", "vps", "port", "service", "deploy", "nginx", "ssh"],
+        "code": ["python", "function", "import", "error", "debug", "script", "class", "def"],
+        "memory": ["graphiti", "skill", "memory", "entity", "episode", "falkordb"],
+        "planning": ["initiative", "task", "chain", "signal", "agent", "notion"],
+        "communication": ["message", "telegram", "response", "user", "daniel"],
+        "research": ["search", "find", "investigate", "analyze", "report"],
+    }
+    t = text.lower()
+    scores = {d: sum(1 for kw in kws if kw in t) for d, kws in domain_kw.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "general"
+
+
+def cross_domain_transfer():
+    """
+    SkillRL general_skills generation (Step 11 of consolidation cycle):
+    Look across all domain skills in _dynamic/.
+    Find principles that appear in 3+ domain skills (recurring patterns).
+    Promote to vesper-general/SKILL.md as new general principles.
+    Cap at 2 new general principles per cycle.
+    Non-fatal: always wrapped in try/except by caller.
+    """
+    dynamic_skills = list(SKILLS_DYNAMIC_DIR.glob("*/SKILL.md"))
+    if len(dynamic_skills) < 3:
+        logger.info("[cross-domain] Not enough domain skills yet (%d), skipping", len(dynamic_skills))
+        return
+
+    # Read all dynamic skill bodies (cap at 10 to avoid token explosion)
+    skill_texts = []
+    for skill_path in dynamic_skills[:10]:
+        try:
+            content = skill_path.read_text()
+            skill_texts.append(content[:800])
+        except Exception as e:
+            logger.warning("[cross-domain] Could not read %s: %s", skill_path, e)
+
+    if not skill_texts:
+        return
+
+    combined = "\n\n---\n\n".join(skill_texts)
+
+    # Read existing vesper-general principles for dedup
+    existing_general = ""
+    if SKILLS_GENERAL_SKILL_PATH.exists():
+        try:
+            existing_general = SKILLS_GENERAL_SKILL_PATH.read_text()
+        except Exception:
+            pass
+
+    prompt = (
+        "Here are " + str(len(skill_texts)) + " domain skills from VESPER's learned skill library:\n\n"
+        + combined
+        + "\n\nIdentify up to 2 principles that appear across 3 or more of these skills "
+        "and would be useful as GENERAL VESPER operating principles.\n"
+        "These should be broadly applicable across domains, not domain-specific.\n\n"
+        "For each principle provide:\n"
+        "- title: 3-5 words\n"
+        "- principle: 1-2 sentences, actionable\n"
+        "- when_to_apply: specific scenario\n\n"
+        "Return ONLY a JSON array (no markdown fences, no extra text):\n"
+        + _CROSS_DOMAIN_TEMPLATE
+    )
+
+    try:
+        raw = call_llm([{"role": "user", "content": prompt}])
+    except Exception as e:
+        logger.warning("[cross-domain] LLM call failed: %s", e)
+        return
+
+    # Parse JSON array
+    raw = raw.strip()
+    raw = re.sub(r'^```[a-z]*\n?', '', raw)
+    raw = re.sub(r'\n?```$', '', raw.strip())
+    m = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not m:
+        logger.warning("[cross-domain] Could not parse JSON array from LLM response")
+        return
+
+    try:
+        principles = json.loads(m.group())
+    except Exception as e:
+        logger.warning("[cross-domain] JSON parse failed: %s", e)
+        return
+
+    if not principles:
+        logger.info("[cross-domain] LLM returned no cross-domain principles")
+        return
+
+    # Dedup against existing vesper-general content (title-based)
+    new_principles = []
+    for p in principles[:2]:  # Cap at 2 per cycle
+        title = p.get("title", "")
+        if title.lower() in existing_general.lower():
+            logger.info("[cross-domain] Skipping existing principle: %s", title)
+            continue
+        new_principles.append(p)
+
+    if not new_principles:
+        logger.info("[cross-domain] No new cross-domain principles to promote")
+        return
+
+    # Append to vesper-general/SKILL.md under ## General Principles section
+    if not SKILLS_GENERAL_SKILL_PATH.exists():
+        logger.warning("[cross-domain] vesper-general/SKILL.md not found, skipping")
+        return
+
+    append_lines = [
+        "\n\n## General Principles (Cross-Domain)",
+        "*Auto-generated by cross_domain_transfer — " + datetime.utcnow().isoformat() + " UTC*",
+    ]
+    for p in new_principles:
+        append_lines.append("\n### " + p.get("title", "Principle"))
+        append_lines.append(p.get("principle", ""))
+        when = p.get("when_to_apply", "")
+        if when:
+            append_lines.append("*When to apply:* " + when)
+
+    try:
+        with open(SKILLS_GENERAL_SKILL_PATH, "a") as f:
+            f.write("\n".join(append_lines))
+        logger.info(
+            "[cross-domain] Appended %d new general principle(s) to vesper-general/SKILL.md",
+            len(new_principles)
+        )
+    except Exception as e:
+        logger.error("[cross-domain] Failed to write to vesper-general/SKILL.md: %s", e)
+
+
+def run_consolidation_cycle():
+    """
+    Main consolidation loop (fully sync).
+    Uses search_memories() from vesper_graphiti - the correct public API.
+    NOTE: Do NOT call g.search(config=...) directly - it fails standalone.
+    """
+    logger.info("Starting consolidation cycle at %s UTC", datetime.utcnow().isoformat())
+
+    # Ensure _dynamic/ folder exists
+    SKILLS_DYNAMIC_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("_dynamic/ dir ready: %s", SKILLS_DYNAMIC_DIR)
+
+    # Import public search API from vesper_graphiti
+    try:
+        from vesper_graphiti import search_memories, get_graphiti_client
+    except ImportError as e:
+        logger.error("Cannot import vesper_graphiti: %s", e)
+        return
+
+    # Verify Graphiti is available before attempting search
+    g = get_graphiti_client()
+    if g is None:
+        logger.warning("Graphiti client unavailable, skipping cycle")
+        return
+
+    # Step 1: Query recent episodes using search_memories() (correct public API)
+    try:
+        results = search_memories(
+            query="Daniel preferences decisions corrections patterns behaviors",
+            num_results=30,
+            group_id="vesper",
+        )
+    except Exception as e:
+        logger.error("Graphiti search failed: %s", e)
+        results = []
+
+    result_count = len(results) if results else 0
+    logger.info("Graphiti returned %d results", result_count)
+
+    if result_count < MIN_EPISODES_FOR_DISTILLATION:
+        logger.info(
+            "Not enough data yet (%d results, need %d). "
+            "Skipping distillation - script ready for when data accumulates.",
+            result_count, MIN_EPISODES_FOR_DISTILLATION
+        )
+        return
+
+    # Step 2: Query corrections/failures
+    try:
+        corrections = search_memories(
+            query="correction mistake wrong error failure should not avoid",
+            num_results=15,
+            group_id="vesper",
+        )
+    except Exception as e:
+        logger.warning("Corrections search failed: %s", e)
+        corrections = []
+
+    # Step 3: Extract text from results
+    # search_memories() returns edge objects with .fact attribute
+    def extract_text(r):
+        for attr in ("fact", "content", "name", "episode_body"):
+            val = getattr(r, attr, None)
+            if val:
+                return str(val)
+        return str(r)
+
+    episodes_text = "\n".join("- " + extract_text(r) for r in results)
+    corrections_text = "\n".join("- " + extract_text(r) for r in corrections) if corrections else ""
+
+    # Step 4: Detect dominant domain
+    domain = detect_domain(episodes_text)
+    logger.info("Dominant domain: %s", domain)
+
+    # Step 5: Load existing skills for dedup
+    existing_skills = load_existing_skill_descriptions()
+    logger.info("Loaded %d existing skills for dedup", len(existing_skills))
+
+    # Step 6: Run 3-pass distillation
+    proposals = distill_skills(episodes_text, corrections_text, domain, existing_skills)
+    logger.info("Distillation produced %d proposals", len(proposals))
+
+    # Step 7: Write non-duplicate skills (capped at MAX_NEW_SKILLS_PER_CYCLE)
+    written = 0
+    for proposal in proposals:
+        if written >= MAX_NEW_SKILLS_PER_CYCLE:
+            logger.info("Hit MAX_NEW_SKILLS_PER_CYCLE (%d), stopping", MAX_NEW_SKILLS_PER_CYCLE)
+            break
+        skill_name = proposal.get("skill_name", "generated-skill")
+        description = proposal.get("description", "Auto-generated skill")
+        skill_domain = proposal.get("domain", domain)
+        if is_duplicate_skill(description, existing_skills):
+            logger.info("Skipping duplicate: %s", skill_name)
+            continue
+        body = format_skill_body(proposal)
+        path = write_skill_md(skill_name, description, body, skill_domain)
+        existing_skills.append({"name": skill_name, "description": description, "path": str(path)})
+        written += 1
+
+    logger.info("Cycle complete - wrote %d new skill(s)", written)
+    if written == 0:
+        logger.info("No new skills written (all duplicates or no proposals from distillation)")
+
+    # Step 8: Run skill confidence update cycle (non-fatal)
+    try:
+        import asyncio as _asyncio
+        from vesper_skill_confidence import run_confidence_update_cycle as _run_conf
+        _asyncio.run(_run_conf())
+        logger.info("Confidence update cycle complete")
+    except Exception as e:
+        logger.warning("Confidence update cycle failed (non-fatal): %s", e)
+
+    # Step 9: Run entity consolidation cycle (non-fatal) — VESPER-31
+    # Enriches Graphiti entity summaries using graph neighborhood context (Cognee pattern)
+    try:
+        from vesper_entity_consolidation import run_entity_consolidation
+        run_entity_consolidation()
+        logger.info("Entity consolidation cycle complete")
+    except Exception as e:
+        logger.warning("Entity consolidation cycle failed (non-fatal): %s", e)
+
+    # Step 10: Run community detection (non-fatal, weekly) — VESPER-32
+    # Builds topic clusters from Graphiti knowledge graph, generates community summaries
+    # Runs weekly (Mondays only) — LLM calls per cluster make this expensive
+    try:
+        from vesper_community_detection import run_community_detection
+        run_community_detection()
+        logger.info("Community detection cycle complete")
+    except Exception as e:
+        logger.warning("Community detection cycle failed (non-fatal): %s", e)
+
+    # Step 11: Cross-domain skill transfer (non-fatal) — VESPER-34
+    # Promotes recurring general principles from domain skills to vesper-general/SKILL.md
+    # SkillRL general_skills pattern. Runs when 3+ dynamic skills exist.
+    try:
+        cross_domain_transfer()
+        logger.info("Cross-domain transfer cycle complete")
+    except Exception as e:
+        logger.warning("Cross-domain transfer cycle failed (non-fatal): %s", e)
+
+
+if __name__ == "__main__":
+    run_consolidation_cycle()

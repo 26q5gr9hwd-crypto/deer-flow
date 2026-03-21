@@ -1,384 +1,403 @@
-"""Memory updater for reading, writing, and updating memory data."""
+"""VESPER Memory Extraction Pipeline — updater.py v3.0
+
+Extraction pipeline that produces structured memory data for Graphiti add_episode().
+
+Architecture:
+- Two-layer extraction policy: immediate write + debounced write
+- Single LLM call -> typed JSON output (facts + entities + relations + corrections + feedback)
+- Graphiti handles entity extraction, dedup, and storage via add_episode()
+- Extraction is async/background — never blocks user response
+- Single unified extraction from both user messages and assistant responses
+
+v3.0 changes (VESPER-17B):
+- Removed legacy FalkorDB Cypher write code (Graphiti handles storage)
+- Removed dead Mem0 code paths (get_mem0_client, _write_fact_to_mem0, _fact_already_stored)
+- Removed dead dedup code (_compute_fact_hash, psycopg2, _written_hashes)
+- Removed FalkorDB helpers (_escape_cypher, _cypher_props, write_entity/relation/correction_to_graph)
+- Removed unused imports (hashlib, threading, unicodedata)
+- Removed dead constants (NODE_TYPES, EDGE_TYPES, NAMESPACES, SOURCE_TYPES, _LB, _RB)
+- Added feedback detection as extraction side output
+- Cleaned up run_extraction() — returns extraction + feedback metadata
+
+v2.4 changes (VESPER-13):
+- Unified extraction: single LLM call extracts from both user and assistant
+- Source tagging handled by unified prompt: observed (user) vs inferred (assistant)
+
+VESPER-40:
+- Added FileHandler -> /tmp/vesper_updater.log for extraction debugging
+"""
 
 import json
+import logging
+import os
 import re
-import uuid
+import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from src.agents.memory.prompt import (
-    MEMORY_UPDATE_PROMPT,
-    format_conversation_for_update,
-)
+# v2.3: Ensure backend root is on sys.path for vesper_memory_config import
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
+
+from src.agents.memory.prompt import COMBINED_EXTRACTION_PROMPT
 from src.config.memory_config import get_memory_config
-from src.config.paths import get_paths
-from src.models import create_chat_model
+
+logger = logging.getLogger(__name__)
+
+# v2.3: Ensure this logger actually outputs (default Python logging has no handlers)
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(name)s] %(levelname)s: %(message)s'))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+
+# VESPER-40: File logger for extraction pipeline debugging
+_updater_log = logging.getLogger('vesper.updater')
+if not _updater_log.handlers:
+    _fh = logging.FileHandler('/tmp/vesper_updater.log')
+    _fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    _updater_log.addHandler(_fh)
+    _updater_log.setLevel(logging.INFO)
 
 
-def _get_memory_file_path(agent_name: str | None = None) -> Path:
-    """Get the path to the memory file.
+# --- Trivial Message & Immediate Trigger Detection ---
 
-    Args:
-        agent_name: If provided, returns the per-agent memory file path.
-                    If None, returns the global memory file path.
+TRIVIAL_PATTERNS = [
+    re.compile(
+        r'^(hey|hi|hello|yo|sup|thanks|thx|thank you|ok|okay|k|lol|haha|heh|'
+        r'hmm|mhm|yep|yup|nope|nah|cool|nice|great|awesome|sure|yeah|yes|no|'
+        r'bye|cya|gn|gm|ty|np|gg|brb|afk|wb)[\s!?.]*$',
+        re.IGNORECASE,
+    ),
+    re.compile(r'^\s*[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF'
+               r'\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U0000FE00-\U0000FE0F'
+               r'\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF]+\s*$'),
+]
 
-    Returns:
-        Path to the memory file.
-    """
-    if agent_name is not None:
-        return get_paths().agent_memory_file(agent_name)
+IMMEDIATE_TRIGGERS = [
+    re.compile(r"(?i)(no,?\s+(i|it|that|we|actually)|not\s+\w+,?\s+(it\'?s|its|i)"
+               r"|actually,?\s+(i|it|that|we)|i\s+meant|i\s+was\s+wrong)"),
+    re.compile(r"(?i)(i\s+prefer|i\s+like|i\s+want|i\s+don\'?t\s+(like|want)"
+               r"|i\s+hate|i\s+love|my\s+favorite|i\s+always\s+use)"),
+    re.compile(r"(?i)(remember\s+(this|that)|note\s+(this|that)|don\'?t\s+forget"
+               r"|keep\s+in\s+mind|fyi|for\s+your\s+info)"),
+    re.compile(r"(?i)(i\s+(ate|eaten|had\s+\w+\s+for|took|feeling|feel\s+\w+"
+               r"|slept|exercised|worked\s+out|ran|walked|weight|sick|tired))"),
+    re.compile(r"(?i)(let\'?s\s+(go|do|use|pick|stick)|we\'?ll\s+(use|go|do)"
+               r"|decided\s+to|going\s+with|i\'?ll\s+go\s+with|switching\s+to)"),
+]
 
-    config = get_memory_config()
-    if config.storage_path:
-        p = Path(config.storage_path)
-        # Absolute path: use as-is; relative path: resolve against base_dir
-        return p if p.is_absolute() else get_paths().base_dir / p
-    return get_paths().memory_file
-
-
-def _create_empty_memory() -> dict[str, Any]:
-    """Create an empty memory structure."""
-    return {
-        "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
-        "user": {
-            "workContext": {"summary": "", "updatedAt": ""},
-            "personalContext": {"summary": "", "updatedAt": ""},
-            "topOfMind": {"summary": "", "updatedAt": ""},
-        },
-        "history": {
-            "recentMonths": {"summary": "", "updatedAt": ""},
-            "earlierContext": {"summary": "", "updatedAt": ""},
-            "longTermBackground": {"summary": "", "updatedAt": ""},
-        },
-        "facts": [],
-    }
+COMMAND_PATTERNS = [
+    re.compile(r'^/(new|status|memory|help|models|fast|projects|tasks)'),
+]
 
 
-# Per-agent memory cache: keyed by agent_name (None = global)
-# Value: (memory_data, file_mtime)
-_memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
-
-
-def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Get the current memory data (cached with file modification time check).
-
-    The cache is automatically invalidated if the memory file has been modified
-    since the last load, ensuring fresh data is always returned.
-
-    Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
+def classify_extraction(message: str) -> str:
+    """Classify a user message for extraction policy.
 
     Returns:
-        The memory data dictionary.
+        'immediate' - extract now (corrections, preferences, health, decisions)
+        'debounced' - extract later (general conversation)
+        'skip' - no extraction (trivial messages, commands)
     """
-    file_path = _get_memory_file_path(agent_name)
+    text = message.strip()
+    if not text or len(text) < 2:
+        return 'skip'
 
-    # Get current file modification time
-    try:
-        current_mtime = file_path.stat().st_mtime if file_path.exists() else None
-    except OSError:
-        current_mtime = None
+    for pattern in COMMAND_PATTERNS:
+        if pattern.match(text):
+            return 'skip'
 
-    cached = _memory_cache.get(agent_name)
+    for pattern in TRIVIAL_PATTERNS:
+        if pattern.match(text):
+            return 'skip'
 
-    # Invalidate cache if file has been modified or doesn't exist
-    if cached is None or cached[1] != current_mtime:
-        memory_data = _load_memory_from_file(agent_name)
-        _memory_cache[agent_name] = (memory_data, current_mtime)
-        return memory_data
+    for pattern in IMMEDIATE_TRIGGERS:
+        if pattern.search(text):
+            return 'immediate'
 
-    return cached[0]
+    return 'debounced'
 
 
-def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Reload memory data from file, forcing cache invalidation.
+# --- Extraction LLM ---
 
-    Args:
-        agent_name: If provided, reloads per-agent memory. If None, reloads global memory.
+def _call_extraction_llm(user_message: str, assistant_response: str = '') -> dict:
+    """Call extraction LLM with the combined extraction prompt.
 
-    Returns:
-        The reloaded memory data dictionary.
+    v3.0: Now also extracts feedback detection fields.
+
+    Returns parsed JSON dict with keys: facts, entities, relations, corrections,
+    plus feedback fields: feedback_detected, feedback_score, feedback_text,
+    contains_followup_question.
+    Returns empty structure on failure.
     """
-    file_path = _get_memory_file_path(agent_name)
-    memory_data = _load_memory_from_file(agent_name)
-
-    try:
-        mtime = file_path.stat().st_mtime if file_path.exists() else None
-    except OSError:
-        mtime = None
-
-    _memory_cache[agent_name] = (memory_data, mtime)
-    return memory_data
-
-
-def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
-    """Load memory data from file.
-
-    Args:
-        agent_name: If provided, loads per-agent memory file. If None, loads global.
-
-    Returns:
-        The memory data dictionary.
-    """
-    file_path = _get_memory_file_path(agent_name)
-
-    if not file_path.exists():
-        return _create_empty_memory()
+    empty = dict(
+        facts=[], entities=[], relations=[], corrections=[],
+        feedback_detected=False, feedback_score=0.0,
+        feedback_text='', contains_followup_question=False,
+    )
 
     try:
-        with open(file_path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to load memory file: {e}")
-        return _create_empty_memory()
+        from src.models import create_chat_model
 
+        asst = assistant_response[:2000] if assistant_response else '(none)'
+        prompt = (COMBINED_EXTRACTION_PROMPT
+                  .replace('__USER_MESSAGE__', user_message)
+                  .replace('__ASSISTANT_RESPONSE__', asst))
 
-# Matches sentences that describe a file-upload *event* rather than general
-# file-related work.  Deliberately narrow to avoid removing legitimate facts
-# such as "User works with CSV files" or "prefers PDF export".
-_UPLOAD_SENTENCE_RE = re.compile(
-    r"[^.!?]*\b(?:"
-    r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
-    r"|file\s+upload"
-    r"|/mnt/user-data/uploads/"
-    r"|<uploaded_files>"
-    r")[^.!?]*[.!?]?\s*",
-    re.IGNORECASE,
-)
+        model = create_chat_model(name='gpt-oss-120b', thinking_enabled=False)
+        response = model.invoke(prompt)
+        response_text = str(response.content).strip()
 
+        # Strip markdown code blocks if present
+        if response_text.startswith('```'):
+            lines = response_text.split('\n')
+            end_idx = -1 if lines[-1].strip().startswith('```') else len(lines)
+            response_text = '\n'.join(lines[1:end_idx])
 
-def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries and facts.
+        result = json.loads(response_text)
 
-    Uploaded files are session-scoped; persisting upload events in long-term
-    memory causes the agent to search for non-existent files in future sessions.
-    """
-    # Scrub summaries in user/history sections
-    for section in ("user", "history"):
-        section_data = memory_data.get(section, {})
-        for _key, val in section_data.items():
-            if isinstance(val, dict) and "summary" in val:
-                cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
-                cleaned = re.sub(r"  +", " ", cleaned)
-                val["summary"] = cleaned
+        for key in ('facts', 'entities', 'relations', 'corrections'):
+            if key not in result or not isinstance(result[key], list):
+                result[key] = []
 
-    # Also remove any facts that describe upload events
-    facts = memory_data.get("facts", [])
-    if facts:
-        memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
-
-    return memory_data
-
-
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-    """Save memory data to file and update cache.
-
-    Args:
-        memory_data: The memory data to save.
-        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    file_path = _get_memory_file_path(agent_name)
-
-    try:
-        # Ensure directory exists
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Update lastUpdated timestamp
-        memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
-
-        # Write atomically using temp file
-        temp_path = file_path.with_suffix(".tmp")
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(memory_data, f, indent=2, ensure_ascii=False)
-
-        # Rename temp file to actual file (atomic on most systems)
-        temp_path.replace(file_path)
-
-        # Update cache and file modification time
+        # VESPER-17B: Parse feedback fields with graceful fallback
+        result['feedback_detected'] = bool(result.get('feedback_detected', False))
         try:
-            mtime = file_path.stat().st_mtime
-        except OSError:
-            mtime = None
+            score = float(result.get('feedback_score', 0.0))
+            result['feedback_score'] = max(0.0, min(5.0, score))
+        except (TypeError, ValueError):
+            result['feedback_score'] = 0.0
+        result['feedback_text'] = str(result.get('feedback_text', '') or '')
+        result['contains_followup_question'] = bool(
+            result.get('contains_followup_question', False))
 
-        _memory_cache[agent_name] = (memory_data, mtime)
+        return result
 
-        print(f"Memory saved to {file_path}")
-        return True
-    except OSError as e:
-        print(f"Failed to save memory file: {e}")
-        return False
+    except json.JSONDecodeError as e:
+        logger.error(f"Extraction LLM returned invalid JSON: {e}")
+        return empty
+    except Exception as e:
+        logger.error(f"Extraction LLM call failed: {e}")
+        return empty
 
+
+# --- Main Extraction Pipeline ---
+
+_COUNT_KEYS = ('facts', 'entities', 'relations', 'corrections')
+
+
+def run_extraction(
+    user_message: str,
+    assistant_response: str = '',
+    classification: str = 'debounced',
+) -> dict:
+    """Run the combined extraction pipeline.
+
+    v3.0: Extraction only. Graphiti handles storage via add_episode().
+    Returns extraction results including feedback metadata for Graphiti
+    episode tagging.
+
+    Args:
+        user_message: The user's message text
+        assistant_response: The assistant's response (for context and extraction)
+        classification: 'immediate' or 'debounced'
+
+    Returns:
+        Dict with counts (facts, entities, relations, corrections) plus
+        feedback fields and raw _extraction data for Graphiti episode tagging.
+    """
+    result = dict(
+        facts=0, entities=0, relations=0, corrections=0,
+        feedback_detected=False, feedback_score=0.0,
+        feedback_text='', contains_followup_question=False,
+        _extraction=None,
+    )
+
+    # VESPER-40: Log extraction start to file
+    _updater_log.info(
+        "Extraction starting (%s): msg=%r",
+        classification, user_message[:80]
+    )
+
+    try:
+        extraction = _call_extraction_llm(user_message, assistant_response)
+
+        # Count extracted items
+        result['facts'] = len(extraction.get('facts', []))
+        result['entities'] = len(extraction.get('entities', []))
+        result['relations'] = len(extraction.get('relations', []))
+        result['corrections'] = len(extraction.get('corrections', []))
+
+        # VESPER-17B: Capture feedback metadata for Graphiti episode tagging
+        result['feedback_detected'] = extraction.get('feedback_detected', False)
+        result['feedback_score'] = extraction.get('feedback_score', 0.0)
+        result['feedback_text'] = extraction.get('feedback_text', '')
+        result['contains_followup_question'] = extraction.get(
+            'contains_followup_question', False)
+
+        # Store raw extraction for callers (e.g. Graphiti episode content)
+        result['_extraction'] = extraction
+
+        fb_tag = ''
+        if result['feedback_detected']:
+            fb_tag = f" [feedback: score={result['feedback_score']}]"
+
+        log_msg = (
+            f"Extraction complete ({classification}): "
+            f"{result['facts']}F {result['entities']}E "
+            f"{result['relations']}R {result['corrections']}C{fb_tag}"
+        )
+        logger.info(log_msg)
+        # VESPER-40: Also write to file
+        _updater_log.info(log_msg)
+
+    except Exception as e:
+        err_msg = f"Extraction pipeline failed: {type(e).__name__}: {e}"
+        logger.error(err_msg)
+        _updater_log.error(err_msg)
+
+    return result
+
+
+# --- Backward-Compatible Interface ---
 
 class MemoryUpdater:
-    """Updates memory using LLM based on conversation context."""
+    """Updated MemoryUpdater using the VESPER extraction pipeline.
+
+    v3.0: Extraction + feedback detection. Graphiti handles storage.
+    Backward-compatible with the old MemoryUpdater interface used by queue.py.
+    """
 
     def __init__(self, model_name: str | None = None):
-        """Initialize the memory updater.
-
-        Args:
-            model_name: Optional model name to use. If None, uses config or default.
-        """
         self._model_name = model_name
 
-    def _get_model(self):
-        """Get the model for memory updates."""
-        config = get_memory_config()
-        model_name = self._model_name or config.model_name
-        return create_chat_model(name=model_name, thinking_enabled=False)
-
-    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+    def update_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> bool:
         """Update memory based on conversation messages.
 
-        Args:
-            messages: List of conversation messages.
-            thread_id: Optional thread ID for tracking source.
-            agent_name: If provided, updates per-agent memory. If None, updates global memory.
-
-        Returns:
-            True if update was successful, False otherwise.
+        v3.0: Extraction + feedback. Storage handled by Graphiti.
         """
         config = get_memory_config()
         if not config.enabled:
+            _updater_log.info("Memory extraction disabled (config.enabled=False), skipping")
             return False
 
         if not messages:
             return False
 
         try:
-            # Get current memory
-            current_memory = get_memory_data(agent_name)
+            pairs = []
+            current_user_msg = None
 
-            # Format conversation for prompt
-            conversation_text = format_conversation_for_update(messages)
+            for msg in messages:
+                role = getattr(msg, 'type', 'unknown')
+                content = getattr(msg, 'content', str(msg))
 
-            if not conversation_text.strip():
+                if isinstance(content, list):
+                    text_parts = [
+                        p.get('text', '') for p in content
+                        if isinstance(p, dict) and 'text' in p
+                    ]
+                    content = (
+                        ' '.join(text_parts) if text_parts
+                        else str(content))
+
+                content = str(content).strip()
+
+                if role == 'human' and content:
+                    content = re.sub(
+                        r'<uploaded_files>[\s\S]*?</uploaded_files>\n*',
+                        '', content,
+                    ).strip()
+                    if content:
+                        current_user_msg = content
+                elif role == 'ai' and current_user_msg and content:
+                    tool_calls = getattr(msg, 'tool_calls', None)
+                    if not tool_calls:
+                        pairs.append((current_user_msg, content))
+                        current_user_msg = None
+
+            if not pairs:
+                _updater_log.info("No valid user/assistant pairs found, skipping extraction")
                 return False
 
-            # Build prompt
-            prompt = MEMORY_UPDATE_PROMPT.format(
-                current_memory=json.dumps(current_memory, indent=2),
-                conversation=conversation_text,
-            )
+            _updater_log.info("update_memory: processing %d pair(s)", len(pairs))
+            any_success = False
 
-            # Call LLM
-            model = self._get_model()
-            response = model.invoke(prompt)
-            response_text = str(response.content).strip()
+            for user_msg, assistant_resp in pairs:
+                classification = classify_extraction(user_msg)
 
-            # Parse response
-            # Remove markdown code blocks if present
-            if response_text.startswith("```"):
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+                if classification == 'skip':
+                    logger.debug(f"Skipping trivial: {user_msg[:40]}")
+                    _updater_log.info("Skipping trivial message: %r", user_msg[:40])
+                    continue
 
-            update_data = json.loads(response_text)
+                counts = run_extraction(
+                    user_msg, assistant_resp, classification)
+                if any(counts.get(k, 0) > 0 for k in _COUNT_KEYS):
+                    any_success = True
 
-            # Apply updates
-            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+            return any_success
 
-            # Strip file-upload mentions from all summaries before saving.
-            # Uploaded files are session-scoped and won't exist in future sessions,
-            # so recording upload events in long-term memory causes the agent to
-            # try (and fail) to locate those files in subsequent conversations.
-            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-
-            # Save
-            return _save_memory_to_file(updated_memory, agent_name)
-
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
-            return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.error(f"Memory update failed: {e}")
+            _updater_log.error("Memory update failed: %s", e)
             return False
 
-    def _apply_updates(
-        self,
-        current_memory: dict[str, Any],
-        update_data: dict[str, Any],
-        thread_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Apply LLM-generated updates to memory.
 
-        Args:
-            current_memory: Current memory data.
-            update_data: Updates from LLM.
-            thread_id: Optional thread ID for tracking.
-
-        Returns:
-            Updated memory data.
-        """
-        config = get_memory_config()
-        now = datetime.utcnow().isoformat() + "Z"
-
-        # Update user sections
-        user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
-            section_data = user_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
-                current_memory["user"][section] = {
-                    "summary": section_data["summary"],
-                    "updatedAt": now,
-                }
-
-        # Update history sections
-        history_updates = update_data.get("history", {})
-        for section in ["recentMonths", "earlierContext", "longTermBackground"]:
-            section_data = history_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
-                current_memory["history"][section] = {
-                    "summary": section_data["summary"],
-                    "updatedAt": now,
-                }
-
-        # Remove facts
-        facts_to_remove = set(update_data.get("factsToRemove", []))
-        if facts_to_remove:
-            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
-
-        # Add new facts
-        new_facts = update_data.get("newFacts", [])
-        for fact in new_facts:
-            confidence = fact.get("confidence", 0.5)
-            if confidence >= config.fact_confidence_threshold:
-                fact_entry = {
-                    "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": fact.get("content", ""),
-                    "category": fact.get("category", "context"),
-                    "confidence": confidence,
-                    "createdAt": now,
-                    "source": thread_id or "unknown",
-                }
-                current_memory["facts"].append(fact_entry)
-
-        # Enforce max facts limit
-        if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
-
-        return current_memory
-
-
-def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
-    """Convenience function to update memory from a conversation.
-
-    Args:
-        messages: List of conversation messages.
-        thread_id: Optional thread ID.
-        agent_name: If provided, updates per-agent memory. If None, updates global memory.
-
-    Returns:
-        True if successful, False otherwise.
-    """
+def update_memory_from_conversation(
+    messages: list[Any],
+    thread_id: str | None = None,
+    agent_name: str | None = None,
+) -> bool:
+    """Convenience function to update memory from a conversation."""
     updater = MemoryUpdater()
     return updater.update_memory(messages, thread_id, agent_name)
+
+
+# --- Legacy Compatibility Shims ---
+
+def get_graphiti_client():
+    """Stub for Graphiti client — returns None (used by memory/__init__.py)."""
+    return None
+
+
+def get_graph():
+    """Stub for FalkorDB graph client — returns None (removed in v3.0, kept for backward compat)."""
+    return None
+
+
+def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Get memory data. Returns empty structure for v2+ compatibility.
+
+    NOTE: In VESPER v2+, memory injection is handled by
+    vesper_context_middleware.py which queries Graphiti directly.
+    """
+    return dict(
+        version='3.0',
+        lastUpdated=datetime.utcnow().isoformat() + 'Z',
+        user=dict(
+            workContext=dict(summary='', updatedAt=''),
+            personalContext=dict(summary='', updatedAt=''),
+            topOfMind=dict(summary='', updatedAt=''),
+        ),
+        history=dict(
+            recentMonths=dict(summary='', updatedAt=''),
+            earlierContext=dict(summary='', updatedAt=''),
+            longTermBackground=dict(summary='', updatedAt=''),
+        ),
+        facts=[],
+    )
+
+
+def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Reload memory data. Compatibility shim for v2+."""
+    return get_memory_data(agent_name)

@@ -1,0 +1,345 @@
+"""
+VESPER Skill Confidence Tracker — vesper_skill_confidence.py v1.0
+
+Tracks which skills are actually helping vs needing revision, using
+Graphiti correction signals as negative feedback.
+
+Confidence model:
+- Default: 0.75
+- Positive signal (no correction): +0.05
+- Negative signal (correction overlaps skill topic): -0.1
+- Stored in SKILL.md YAML frontmatter: confidence, uses, last_updated,
+  flagged_for_revision
+
+Skill paths: /opt/deer-flow/skills/custom/ (discovered during VESPER-28,
+             NOT backend/skills/custom/)
+
+Integration: Called from vesper_consolidation.py after writing new skills.
+Cron: Weekly report every Monday 09:00 UTC.
+"""
+
+import asyncio
+import logging
+import os
+import pathlib
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env — same pattern as vesper_consolidation.py
+_this_dir = pathlib.Path(__file__).resolve().parent
+_env_path = _this_dir.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    _env_path2 = _this_dir / ".env"
+    if _env_path2.exists():
+        load_dotenv(_env_path2)
+    else:
+        load_dotenv()
+
+# Add backend dir to sys.path for vesper_graphiti
+_backend_dir = pathlib.Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+logging.basicConfig(level=logging.INFO, format='[skill-confidence] %(message)s')
+logger = logging.getLogger(__name__)
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    logger.error("PyYAML not installed — install with: pip install pyyaml")
+
+# Skills live at /opt/deer-flow/skills/custom/ (NOT backend/skills/custom/)
+# Discovered during VESPER-28 — matches SKILLS_CUSTOM_DIR in vesper_consolidation.py
+DEERFLOW_DIR = Path("/opt/deer-flow")
+SKILLS_CUSTOM_DIR = DEERFLOW_DIR / "skills" / "custom"
+
+# Confidence thresholds
+REVISION_THRESHOLD = 0.3       # below this + enough uses → flagged
+MIN_USES_FOR_FLAG = 10         # minimum uses before flagging for revision
+POSITIVE_DELTA = 0.05          # reward: skill used, no correction
+NEGATIVE_DELTA = -0.1          # penalty: skill topic overlaps a correction
+OVERLAP_THRESHOLD = 0.2        # word overlap ratio to consider skill "active"
+
+
+def _parse_frontmatter(content: str):
+    """Parse YAML frontmatter from SKILL.md. Returns (meta_dict, body_str)."""
+    if not content.startswith("---"):
+        return {}, content
+    end = content.find("---", 3)
+    if end < 0:
+        return {}, content
+    fm_str = content[3:end].strip()
+    body = content[end + 3:]
+    if yaml is None:
+        return {}, body
+    try:
+        meta = yaml.safe_load(fm_str) or {}
+    except Exception as e:
+        logger.warning("YAML parse error in frontmatter: %s", e)
+        meta = {}
+    return meta, body
+
+
+def _write_frontmatter(meta: dict, body: str) -> str:
+    """Serialize meta dict back as YAML frontmatter prepended to body."""
+    if yaml is None:
+        return body
+    return "---\n" + yaml.dump(meta, default_flow_style=False) + "---" + body
+
+
+def get_skill_confidence(skill_path: Path) -> float:
+    """Read confidence score from SKILL.md frontmatter. Returns 0.75 if not set."""
+    try:
+        content = skill_path.read_text()
+        meta, _ = _parse_frontmatter(content)
+        return float(meta.get("confidence", 0.75))
+    except Exception as e:
+        logger.warning("Cannot read confidence from %s: %s", skill_path, e)
+        return 0.75
+
+
+def update_skill_confidence(skill_path: Path, delta: float) -> float:
+    """
+    Update confidence score in SKILL.md frontmatter.
+    delta: +POSITIVE_DELTA for use without correction, NEGATIVE_DELTA for correction.
+    Returns new confidence value.
+    """
+    try:
+        content = skill_path.read_text()
+        meta, body = _parse_frontmatter(content)
+        current = float(meta.get("confidence", 0.75))
+        new_confidence = round(max(0.0, min(1.0, current + delta)), 4)
+        meta["confidence"] = new_confidence
+        meta["uses"] = int(meta.get("uses", 0)) + 1
+        meta["last_updated"] = datetime.utcnow().isoformat()
+
+        # Flag for revision if below threshold and has enough uses
+        uses = meta["uses"]
+        if new_confidence < REVISION_THRESHOLD and uses >= MIN_USES_FOR_FLAG:
+            meta["flagged_for_revision"] = True
+            logger.warning(
+                "Skill '%s' flagged for revision (confidence=%.3f, uses=%d)",
+                skill_path.parent.name, new_confidence, uses
+            )
+        else:
+            meta.pop("flagged_for_revision", None)
+
+        skill_path.write_text(_write_frontmatter(meta, body))
+        logger.info(
+            "Skill '%s': %.3f -> %.3f (delta=%+.2f, uses=%d)",
+            skill_path.parent.name, current, new_confidence, delta, uses
+        )
+        return new_confidence
+    except Exception as e:
+        logger.warning("Cannot update confidence for %s: %s", skill_path, e)
+        return 0.75
+
+
+def _word_overlap(text1: str, text2: str) -> float:
+    """Jaccard word overlap ratio between two texts."""
+    w1 = set(re.findall(r'\w+', text1.lower()))
+    w2 = set(re.findall(r'\w+', text2.lower()))
+    if not w1 or not w2:
+        return 0.0
+    return len(w1 & w2) / len(w1 | w2)
+
+
+def _get_all_skills() -> list:
+    """Return list of (skill_path, meta) for all SKILL.md files found."""
+    skills = []
+    if not SKILLS_CUSTOM_DIR.exists():
+        logger.warning("Skills dir does not exist: %s", SKILLS_CUSTOM_DIR)
+        return skills
+    for skill_md in SKILLS_CUSTOM_DIR.rglob("SKILL.md"):
+        try:
+            content = skill_md.read_text()
+            meta, _ = _parse_frontmatter(content)
+            skills.append((skill_md, meta))
+        except Exception as e:
+            logger.warning("Cannot read %s: %s", skill_md, e)
+    return skills
+
+
+async def run_confidence_update_cycle():
+    """
+    Query Graphiti for recent correction signals.
+    For each correction: find skills whose topic overlaps the correction → penalize.
+    Skills with no correction overlap → small reward.
+    Skills below REVISION_THRESHOLD after MIN_USES_FOR_FLAG uses → flagged.
+    """
+    if yaml is None:
+        logger.error("PyYAML unavailable — skipping confidence update")
+        return
+
+    logger.info("Starting confidence update cycle at %s UTC", datetime.utcnow().isoformat())
+
+    # Import Graphiti helpers (same pattern as vesper_consolidation.py)
+    try:
+        from vesper_graphiti import search_memories, get_graphiti_client
+    except ImportError as e:
+        logger.error("Cannot import vesper_graphiti: %s — skipping", e)
+        return
+
+    # Verify Graphiti is reachable (get_graphiti_client is SYNC — do NOT await)
+    g = get_graphiti_client()
+    if g is None:
+        logger.warning("Graphiti client unavailable — skipping confidence update")
+        return
+
+    # Load all skill files
+    all_skills = _get_all_skills()
+    if not all_skills:
+        logger.info("No skills found in %s — nothing to update", SKILLS_CUSTOM_DIR)
+        return
+
+    logger.info("Tracking confidence for %d skills", len(all_skills))
+
+    # Query Graphiti for recent correction signals
+    try:
+        corrections = search_memories(
+            query="correction mistake wrong error should not avoid failed instead bad",
+            num_results=20,
+            group_id="vesper",
+        )
+    except Exception as e:
+        logger.error("Graphiti correction search failed: %s", e)
+        corrections = []
+
+    def _extract_text(r) -> str:
+        for attr in ("fact", "content", "name", "episode_body"):
+            val = getattr(r, attr, None)
+            if val:
+                return str(val)
+        return str(r)
+
+    correction_texts = [_extract_text(r) for r in corrections] if corrections else []
+    logger.info("Found %d correction signals in Graphiti", len(correction_texts))
+
+    if not correction_texts:
+        logger.info("No corrections found, skipping confidence update")
+        return
+
+    combined_corrections = " ".join(correction_texts)
+
+    penalized = 0
+    rewarded = 0
+    flagged_skills = []
+
+    for skill_path, meta in all_skills:
+        skill_name = meta.get("name", skill_path.parent.name)
+        skill_desc = meta.get("description", "")
+        skill_topic = skill_name + " " + skill_desc
+
+        # Heuristic: if skill topic overlaps correction corpus, it was likely
+        # active during a corrected turn → penalize
+        overlap = _word_overlap(skill_topic, combined_corrections)
+
+        if overlap >= OVERLAP_THRESHOLD:
+            new_conf = update_skill_confidence(skill_path, NEGATIVE_DELTA)
+            penalized += 1
+            uses = int(meta.get("uses", 0)) + 1
+            if new_conf < REVISION_THRESHOLD and uses >= MIN_USES_FOR_FLAG:
+                flagged_skills.append((skill_name, new_conf, uses))
+        else:
+            update_skill_confidence(skill_path, POSITIVE_DELTA)
+            rewarded += 1
+
+    logger.info(
+        "Cycle complete: %d penalized, %d rewarded, %d flagged for revision",
+        penalized, rewarded, len(flagged_skills)
+    )
+
+    if flagged_skills:
+        logger.warning(
+            "Revision candidates: %s",
+            ", ".join(f"{n} (conf={c:.2f}, uses={u})" for n, c, u in flagged_skills)
+        )
+
+
+async def generate_weekly_report() -> str:
+    """
+    Generate a weekly skill health report:
+    - Total skills (static vs dynamic)
+    - Skills gaining confidence (top 3)
+    - Skills losing confidence (bottom 3, flagged for revision)
+    - Revision candidates
+    Returns the report as a string.
+    """
+    if yaml is None:
+        return "ERROR: PyYAML unavailable — cannot generate report"
+
+    logger.info("Generating weekly skill health report")
+    all_skills = _get_all_skills()
+
+    if not all_skills:
+        return (
+            f"VESPER Weekly Skill Health Report\n"
+            f"Generated: {datetime.utcnow().date()}\n\n"
+            f"No skills found in {SKILLS_CUSTOM_DIR}."
+        )
+
+    dynamic_prefix = str(SKILLS_CUSTOM_DIR / "_dynamic")
+    static_count = sum(1 for p, _ in all_skills if not str(p).startswith(dynamic_prefix))
+    dynamic_count = sum(1 for p, _ in all_skills if str(p).startswith(dynamic_prefix))
+
+    skill_stats = []
+    for skill_path, meta in all_skills:
+        name = meta.get("name", skill_path.parent.name)
+        confidence = float(meta.get("confidence", 0.75))
+        uses = int(meta.get("uses", 0))
+        flagged = bool(meta.get("flagged_for_revision", False))
+        skill_stats.append({"name": name, "confidence": confidence, "uses": uses, "flagged": flagged})
+
+    skill_stats.sort(key=lambda x: x["confidence"], reverse=True)
+    top_3 = skill_stats[:3]
+    bottom_3 = list(reversed(skill_stats[-3:])) if len(skill_stats) >= 3 else skill_stats
+    flagged = [s for s in skill_stats if s["flagged"]]
+
+    lines = [
+        f"VESPER Weekly Skill Health Report",
+        f"Generated: {datetime.utcnow().isoformat()} UTC",
+        f"",
+        f"--- Summary ---",
+        f"Total skills: {len(all_skills)} ({static_count} static, {dynamic_count} dynamic)",
+        f"Flagged for revision: {len(flagged)}",
+        f"",
+        f"--- Top Performing (High Confidence) ---",
+    ]
+    for s in top_3:
+        lines.append(f"  {s['name']}: confidence={s['confidence']:.2f}, uses={s['uses']}")
+
+    lines += [
+        f"",
+        f"--- Needs Attention (Low Confidence) ---",
+    ]
+    for s in bottom_3:
+        flag = " [FLAGGED FOR REVISION]" if s["flagged"] else ""
+        lines.append(f"  {s['name']}: confidence={s['confidence']:.2f}, uses={s['uses']}{flag}")
+
+    if flagged:
+        lines += [
+            f"",
+            f"--- Revision Required ---",
+        ]
+        for s in flagged:
+            lines.append(f"  {s['name']}: confidence={s['confidence']:.2f} after {s['uses']} uses")
+
+    lines.append(f"\n--- End of Report ---")
+    report = "\n".join(lines)
+    logger.info("Report generated: %d skills, %d flagged", len(all_skills), len(flagged))
+    return report
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        print(asyncio.run(generate_weekly_report()))
+    else:
+        asyncio.run(run_confidence_update_cycle())

@@ -1,7 +1,6 @@
 from datetime import datetime
 
 from src.config.agents_config import load_agent_soul
-from src.subagents.registry import get_subagent_names
 from src.skills import load_skills
 
 
@@ -15,21 +14,6 @@ def _build_subagent_section(max_concurrent: int) -> str:
         Formatted subagent section string.
     """
     n = max_concurrent
-    # VESPER-6: Build Available Subagents dynamically from registry
-    _desc_map = {
-        "general-purpose": "For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.",
-        "bash": "For command execution (git, build, test, deploy operations)",
-        "vesper-code-reader": "For reading and analyzing source code files on the VPS (read-only, safe)",
-        "vesper-code-writer": "For writing and modifying source code files on the VPS",
-    }
-    try:
-        _names = get_subagent_names()
-        available_subagents = "\n".join(
-            f"- **{_n}**: {_desc_map.get(_n, f'Specialized subagent for {_n} tasks')}"
-            for _n in _names
-        )
-    except Exception:
-        available_subagents = "- **general-purpose**: For general tasks\n- **bash**: For command execution"
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
 
@@ -53,7 +37,8 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Example thinking pattern**: "I identified 6 sub-tasks. Since the limit is {n} per turn, I will launch the first {n} now, and the rest in the next turn."
 
 **Available Subagents:**
-{available_subagents}
+- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.
+- **bash**: For command execution (git, build, test, deploy operations)
 
 **Your Orchestration Strategy:**
 

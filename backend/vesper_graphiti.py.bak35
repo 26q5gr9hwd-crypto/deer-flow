@@ -1,0 +1,450 @@
+"""VESPER Graphiti Integration — singleton client + sync wrappers.
+
+VESPER-14: Replaces Mem0 + pgvector with Graphiti + FalkorDB.
+Provides get_graphiti_client(), search_memories(), add_episode() for use
+by vesper_context.py and updater.py.
+
+VESPER-22: Added search_memories_structured() with COMBINED_HYBRID_SEARCH_RRF.
+Updated search_memories() to use 4-channel hybrid search.
+
+VESPER-23: Added memory decay + reinforcement scoring.
+- strength attribute incremented on retrieved entity nodes (+0.1, capped 2.0)
+- decay_all_entities() multiplies all Entity strengths by 0.99 (daily)
+- log_weak_entities() identifies entities with strength < 0.3
+- APScheduler wires daily decay at startup (graceful fallback if not installed)
+
+VESPER-27: Fixed _run_async using a persistent dedicated event loop.
+Previous approach (asyncio.run() per call) created a new loop each time,
+breaking FalkorDB connections bound to the init loop. Previous attempt
+(run_coroutine_threadsafe on running loop) caused deadlock when called
+from the event loop thread (LangGraph --allow-blocking mode).
+
+Fix: one persistent loop in a daemon thread; all Graphiti coroutines are
+scheduled on it via run_coroutine_threadsafe from any calling thread.
+No deadlock, no stale loops.
+"""
+import asyncio
+import logging
+import os
+import threading
+from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
+
+# Load env for API key
+from dotenv import load_dotenv
+import pathlib
+_env_path = pathlib.Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    _env_path2 = pathlib.Path(__file__).resolve().parent / ".env"
+    if _env_path2.exists():
+        load_dotenv(_env_path2)
+    else:
+        load_dotenv()
+
+# Graphiti's default cross_encoder needs OPENAI_API_KEY env var
+_api_key = os.environ.get('OPENROUTER_API_KEY', '')
+if _api_key and not os.environ.get('OPENAI_API_KEY'):
+    os.environ['OPENAI_API_KEY'] = _api_key
+
+_graphiti_instance = None
+_graphiti_lock = threading.Lock()
+
+# APScheduler for daily decay job
+_scheduler = None
+_scheduler_lock = threading.Lock()
+
+# ── Persistent event loop — VESPER-27 core fix ───────────────────────────
+#
+# Problem: asyncio.run() creates a NEW event loop each call.
+#   The FalkorDB driver is initialized on loop-A (during get_graphiti_client).
+#   When add_episode() later calls asyncio.run(), it creates loop-B.
+#   loop-A is now closed. FalkorDB connections fail: "Event loop is closed".
+#
+# Wrong fix: asyncio.run_coroutine_threadsafe(coro, asyncio.get_running_loop())
+#   Deadlocks when the CALLING thread IS the event loop thread
+#   (LangGraph --allow-blocking mode lets sync code run on the loop thread;
+#   future.result() blocks that thread; the coroutine can never run).
+#
+# Correct fix: ONE dedicated daemon thread running loop.run_forever().
+#   All Graphiti coroutines are submitted via run_coroutine_threadsafe.
+#   The calling thread blocks on future.result() but the event loop is in
+#   a DIFFERENT thread — no deadlock, no stale loop, no per-call overhead.
+
+_graphiti_loop: asyncio.AbstractEventLoop | None = None
+_graphiti_loop_thread: threading.Thread | None = None
+_graphiti_loop_lock = threading.Lock()
+
+
+def _get_graphiti_loop() -> asyncio.AbstractEventLoop:
+    """Return the single persistent event loop for all Graphiti operations."""
+    global _graphiti_loop, _graphiti_loop_thread
+    with _graphiti_loop_lock:
+        if _graphiti_loop is not None and _graphiti_loop.is_running():
+            return _graphiti_loop
+        loop = asyncio.new_event_loop()
+        t = threading.Thread(
+            target=loop.run_forever,
+            daemon=True,
+            name='graphiti-event-loop',
+        )
+        t.start()
+        _graphiti_loop = loop
+        _graphiti_loop_thread = t
+        logger.info('[VESPER-27] Persistent Graphiti event loop started')
+        return loop
+
+
+def _run_async(coro, timeout=120):
+    """Run a Graphiti coroutine on the persistent event loop.
+
+    Safe to call from ANY context:
+    - sync code
+    - async code (LangGraph --allow-blocking)
+    - daemon threads (memory queue)
+
+    The persistent loop is always in a separate daemon thread, so
+    future.result() never deadlocks the calling thread.
+    """
+    loop = _get_graphiti_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=timeout)
+
+
+async def _init_graphiti():
+    """Initialize Graphiti with FalkorDB + OpenRouter + FastEmbed."""
+    from graphiti_core import Graphiti
+    from graphiti_core.llm_client import OpenAIClient
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.driver.falkordb_driver import FalkorDriver
+    from graphiti_core.embedder.client import EmbedderClient
+
+    api_key = os.environ.get('OPENROUTER_API_KEY', '')
+
+    class FastEmbedder(EmbedderClient):
+        """Local FastEmbed embedder using nomic-embed-text-v1.5."""
+        def __init__(self):
+            self._model = None
+            class Cfg:
+                embedding_dim = 768
+            self.config = Cfg()
+
+        def _get_model(self):
+            if self._model is None:
+                from fastembed import TextEmbedding
+                self._model = TextEmbedding('nomic-ai/nomic-embed-text-v1.5')
+            return self._model
+
+        async def create(self, input_data):
+            m = self._get_model()
+            if isinstance(input_data, str):
+                input_data = [input_data]
+            embs = list(m.embed(input_data))
+            return embs[0].tolist()[:768]
+
+        async def create_batch(self, input_data_list):
+            m = self._get_model()
+            embs = list(m.embed(input_data_list))
+            return [e.tolist()[:768] for e in embs]
+
+    llm_config = LLMConfig(
+        api_key=api_key,
+        model='openai/gpt-oss-120b',
+        base_url='https://openrouter.ai/api/v1',
+        small_model='openai/gpt-oss-120b',
+        temperature=0.1,
+    )
+
+    driver = FalkorDriver(host='localhost', port=6379, database='vesper_graphiti')
+    llm_client = OpenAIClient(config=llm_config)
+    embedder = FastEmbedder()
+
+    g = Graphiti(
+        graph_driver=driver,
+        llm_client=llm_client,
+        embedder=embedder,
+        store_raw_episode_content=True,
+    )
+    await g.build_indices_and_constraints()
+    logger.info("VESPER-14: Graphiti client initialized with FalkorDB backend")
+    print("[VESPER-14] Graphiti client initialized OK", flush=True)
+    return g
+
+
+def get_graphiti_client():
+    """Get or create singleton Graphiti client. Thread-safe."""
+    global _graphiti_instance
+    if _graphiti_instance is not None:
+        return _graphiti_instance
+    with _graphiti_lock:
+        if _graphiti_instance is not None:
+            return _graphiti_instance
+        try:
+            _graphiti_instance = _run_async(_init_graphiti())
+            _start_decay_scheduler()
+            return _graphiti_instance
+        except Exception as e:
+            logger.error(f"Failed to initialize Graphiti: {e}")
+            print(f"[VESPER-14] FATAL: Graphiti init failed: {e}", flush=True)
+            return None
+
+
+# ── VESPER-23: Memory Decay + Reinforcement ──────────────────────────────────
+
+async def _run_cypher(cypher: str, params: dict = None):
+    """Execute a raw Cypher query against FalkorDB via Graphiti driver."""
+    g = get_graphiti_client()
+    if g is None:
+        return None
+    try:
+        driver = g.driver
+        result = await driver.query(cypher, params or {})
+        return result
+    except Exception as e:
+        logger.warning(f"[VESPER-23] Cypher query failed: {e}")
+        return None
+
+
+async def _reinforce_entities_async(edge_uuids: list):
+    """Increment strength by 0.1 (capped 2.0) for entity nodes referenced
+    by the given search result edge UUIDs.
+    """
+    if not edge_uuids:
+        return
+    try:
+        node_uuids = set()
+        for euuid in edge_uuids:
+            try:
+                result = await _run_cypher(
+                    "MATCH (s)-[r {uuid: $uuid}]->(t) RETURN s.uuid AS su, t.uuid AS tu",
+                    {"uuid": euuid}
+                )
+                if result:
+                    for row in result:
+                        if isinstance(row, dict):
+                            if row.get('su'):
+                                node_uuids.add(str(row['su']))
+                            if row.get('tu'):
+                                node_uuids.add(str(row['tu']))
+            except Exception:
+                pass
+
+        if not node_uuids:
+            node_uuids = set(str(u) for u in edge_uuids)
+
+        for nuuid in node_uuids:
+            try:
+                await _run_cypher(
+                    """MATCH (n:Entity {uuid: $uuid})
+                       SET n.strength = CASE
+                           WHEN coalesce(n.strength, 1.0) + 0.1 > 2.0 THEN 2.0
+                           ELSE coalesce(n.strength, 1.0) + 0.1
+                       END""",
+                    {"uuid": nuuid}
+                )
+            except Exception as e:
+                logger.debug(f"[VESPER-23] Failed to reinforce entity {nuuid}: {e}")
+    except Exception as e:
+        logger.warning(f"[VESPER-23] _reinforce_entities_async error: {e}")
+
+
+def _fire_and_forget_reinforce(edge_uuids: list):
+    """Submit entity reinforcement as a fire-and-forget task."""
+    if not edge_uuids:
+        return
+    try:
+        loop = _get_graphiti_loop()
+        asyncio.run_coroutine_threadsafe(
+            _reinforce_entities_async(edge_uuids), loop
+        )
+    except Exception as e:
+        logger.debug(f"[VESPER-23] Failed to submit reinforce task: {e}")
+
+
+def decay_all_entities():
+    """Multiply all Entity node strengths by 0.99 (daily decay job)."""
+    async def _decay():
+        try:
+            await _run_cypher(
+                """MATCH (n:Entity)
+                   SET n.strength = coalesce(n.strength, 1.0) * 0.99"""
+            )
+            logger.info("[VESPER-23] Daily decay applied: all Entity strengths * 0.99")
+            print("[VESPER-23] Daily decay applied", flush=True)
+        except Exception as e:
+            logger.error(f"[VESPER-23] decay_all_entities Cypher failed: {e}")
+    _run_async(_decay(), timeout=120)
+    log_weak_entities()
+
+
+def log_weak_entities():
+    """Query and log entities with strength < 0.3 (future archival candidates)."""
+    async def _query():
+        try:
+            result = await _run_cypher(
+                """MATCH (n:Entity)
+                   WHERE coalesce(n.strength, 1.0) < 0.3
+                   RETURN n.uuid AS uuid, n.name AS name, n.strength AS strength
+                   LIMIT 500"""
+            )
+            return result or []
+        except Exception as e:
+            logger.warning(f"[VESPER-23] log_weak_entities query failed: {e}")
+            return []
+    try:
+        weak = _run_async(_query(), timeout=60)
+        if weak:
+            logger.info(f"[VESPER-23] Weak entities (strength < 0.3): {len(weak)} found")
+            for row in weak:
+                if isinstance(row, dict):
+                    logger.info(
+                        f"[VESPER-23] WEAK ENTITY — uuid={row.get('uuid')} "
+                        f"name={row.get('name')} strength={row.get('strength')}"
+                    )
+        else:
+            logger.info("[VESPER-23] No weak entities (strength < 0.3) found")
+    except Exception as e:
+        logger.warning(f"[VESPER-23] log_weak_entities failed: {e}")
+
+
+def _start_decay_scheduler():
+    """Start APScheduler background scheduler for daily decay."""
+    global _scheduler
+    with _scheduler_lock:
+        if _scheduler is not None:
+            return
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            _scheduler = BackgroundScheduler(daemon=True)
+            _scheduler.add_job(
+                decay_all_entities,
+                trigger='interval',
+                hours=24,
+                id='vesper_decay',
+                replace_existing=True,
+                next_run_time=datetime.now() + timedelta(hours=24),
+            )
+            _scheduler.start()
+            logger.info("[VESPER-23] Daily decay scheduler started (interval=24h)")
+            print("[VESPER-23] Daily decay scheduler started", flush=True)
+        except ImportError:
+            logger.warning(
+                "[VESPER-23] APScheduler not installed — daily decay will not run automatically."
+            )
+        except Exception as e:
+            logger.warning(f"[VESPER-23] Failed to start decay scheduler: {e}")
+
+
+# ── Search functions ──────────────────────────────────────────────────────────
+
+def search_memories(query, num_results=10, group_id='vesper'):
+    """Search Graphiti for relevant memories. Returns list of fact strings.
+
+    VESPER-22: Now uses COMBINED_HYBRID_SEARCH_RRF (4-channel hybrid:
+    semantic + BM25 + graph traversal + community).
+    VESPER-23: Fire-and-forget reinforcement on retrieved entities.
+    """
+    g = get_graphiti_client()
+    if g is None:
+        return []
+    try:
+        async def _search():
+            results = await g.search(
+                query=query,
+                group_ids=[group_id],
+                num_results=num_results,
+            )
+            facts = []
+            edge_uuids = []
+            for edge in results:
+                fact = getattr(edge, 'fact', None)
+                if fact:
+                    facts.append(fact)
+                else:
+                    facts.append(str(edge))
+                euuid = getattr(edge, 'uuid', None)
+                if euuid:
+                    edge_uuids.append(str(euuid))
+            return facts, edge_uuids
+        facts, edge_uuids = _run_async(_search(), timeout=30)
+        _fire_and_forget_reinforce(edge_uuids)
+        return facts
+    except Exception as e:
+        logger.warning(f"Graphiti search failed: {e}")
+        return []
+
+
+def search_memories_structured(query, num_results=10, group_id='vesper'):
+    """Search Graphiti using COMBINED_HYBRID_SEARCH_RRF, returning structured results.
+
+    VESPER-22: Returns (facts, episodes) tuple for structured context injection.
+    VESPER-23: Fire-and-forget reinforcement on retrieved entities.
+    """
+    g = get_graphiti_client()
+    if g is None:
+        return [], []
+    try:
+        async def _search():
+            results = await g.search(
+                query=query,
+                group_ids=[group_id],
+                num_results=num_results,
+            )
+            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            facts = []
+            episodes = []
+            edge_uuids = []
+            for edge in results:
+                fact = getattr(edge, 'fact', None)
+                if not fact:
+                    fact = str(edge)
+                created_at = getattr(edge, 'created_at', None)
+                if created_at is not None:
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    if created_at >= cutoff:
+                        episodes.append(fact)
+                    else:
+                        facts.append(fact)
+                else:
+                    facts.append(fact)
+                euuid = getattr(edge, 'uuid', None)
+                if euuid:
+                    edge_uuids.append(str(euuid))
+            return facts, episodes, edge_uuids
+        facts, episodes, edge_uuids = _run_async(_search(), timeout=30)
+        _fire_and_forget_reinforce(edge_uuids)
+        return facts, episodes
+    except Exception as e:
+        logger.warning(f"Graphiti structured search failed: {e}")
+        return [], []
+
+
+def add_episode(text, source_description='conversation', group_id='vesper',
+                episode_type=None):
+    """Add an episode to Graphiti. Returns True on success."""
+    g = get_graphiti_client()
+    if g is None:
+        return False
+    try:
+        from graphiti_core.nodes import EpisodeType
+        if episode_type is None:
+            episode_type = EpisodeType.message
+
+        async def _add():
+            await g.add_episode(
+                name=f'vesper_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                episode_body=text,
+                source=episode_type,
+                source_description=source_description,
+                reference_time=datetime.now(),
+                group_id=group_id,
+            )
+            return True
+        return _run_async(_add(), timeout=120)
+    except Exception as e:
+        logger.error(f"Graphiti add_episode failed: {e}")
+        print(f"[VESPER-14] add_episode error: {e}", flush=True)
+        return False

@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from langchain.chat_models import BaseChatModel
 
 from src.config import get_app_config, get_tracing_config, is_tracing_enabled
@@ -60,6 +61,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort:
         kwargs.update({"reasoning_effort": None})
+
+    # VESPER-12: Create httpx client with short keepalive to prevent stale connection reuse.
+    # After subagent execution (10-15s), idle TCP connections go stale. Setting keepalive_expiry=5
+    # ensures connections are closed before they become stale, preventing APIConnectionError retries
+    # that cause duplicate API calls.
+    http_client = httpx.Client(
+        timeout=httpx.Timeout(120.0, connect=10.0),
+        limits=httpx.Limits(keepalive_expiry=5)
+    )
+    kwargs["http_client"] = http_client
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 

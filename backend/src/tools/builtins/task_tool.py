@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from dataclasses import replace
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
@@ -13,6 +13,7 @@ from langgraph.typing import ContextT
 from src.agents.lead_agent.prompt import get_skills_prompt_section
 from src.agents.thread_state import ThreadState
 from src.subagents import SubagentExecutor, get_subagent_config
+from src.subagents.registry import get_subagent_names
 from src.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash"],
+    subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -34,12 +35,11 @@ def task_tool(
     - Handle complex multi-step tasks autonomously
     - Execute commands or operations in isolated contexts
 
-    Available subagent types:
-    - **general-purpose**: A capable agent for complex, multi-step tasks that require
-      both exploration and action. Use when the task requires complex reasoning,
-      multiple dependent steps, or would benefit from isolated context.
-    - **bash**: Command execution specialist for running bash commands. Use for
-      git operations, build processes, or when command output would be verbose.
+    Available subagent types are registered dynamically. Common types:
+    - **general-purpose**: Complex multi-step tasks, research, analysis
+    - **bash**: Command execution (git, build, deploy)
+    - **vesper-code-reader**: Read-only code exploration and explanation
+    - **vesper-code-writer**: Code change generation (output only, no disk writes)
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -60,7 +60,8 @@ def task_tool(
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        available = get_subagent_names()
+        return f"Error: Unknown subagent type '{subagent_type}'. Available: {', '.join(available)}"
 
     # Build config overrides
     overrides: dict = {}

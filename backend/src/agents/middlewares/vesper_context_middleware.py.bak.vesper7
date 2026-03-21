@@ -1,0 +1,100 @@
+"""VESPER Context Middleware - assembles rich context for every VESPER model call.
+
+Replaces DeerFlow stock apply_prompt_template() for the VESPER agent.
+On each model call:
+  1. Extracts latest user message from state.
+  2. Calls assemble_context() -> SOUL.md + datetime + projects + events + Mem0 memories.
+  3. Trims conversation history to last MAX_MESSAGE_WINDOW messages.
+  4. Returns [SystemMessage(context)] + trimmed_non_system.
+
+This keeps the model call small (~800-1,700 tokens context + trimmed history)
+while ensuring every response has fresh, relevant context.
+
+VESPER-7: Removed subagent section injection (~1,734 tokens of bloat).
+VESPER-7: Fixed SystemMessage ID to prevent state accumulation via add_messages.
+VESPER-7: Added per-component token logging.
+"""
+
+import logging
+from typing import override
+
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import SystemMessage
+
+from vesper_context import assemble_context
+
+logger = logging.getLogger(__name__)
+
+# VESPER-7: Fixed ID prevents SystemMessage accumulation via add_messages reducer.
+# Without this, each before_model creates a SystemMessage with a new UUID,
+# and the add_messages reducer appends it (instead of replacing the old one),
+# causing system prompt tokens to grow linearly with every model call.
+_SYSTEM_MSG_ID = "vesper-system-prompt"
+
+
+class VesperContextMiddlewareState(AgentState):
+    """Compatible with the ThreadState schema."""
+
+    pass
+
+
+class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
+    """Middleware that injects VESPER-specific context before each model call."""
+
+    MAX_MESSAGE_WINDOW = 15
+    state_schema = VesperContextMiddlewareState
+
+    @override
+    def before_model(self, state, runtime):
+        messages = state.get("messages", [])
+
+        # Find latest user message for context assembly
+        user_message = ""
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) == "human":
+                content = getattr(msg, "content", "")
+                if isinstance(content, str):
+                    user_message = content
+                elif isinstance(content, list):
+                    user_message = " ".join(
+                        p.get("text", "") for p in content if isinstance(p, dict)
+                    )
+                break
+
+        # Assemble context (SOUL.md + datetime + projects + events + Mem0 memories)
+        context = assemble_context(user_message)
+
+        # VESPER-7: Subagent section REMOVED.
+        # Was injecting ~6,937 chars (~1,734 tokens) of subagent orchestration
+        # instructions on every model call. VESPER does not use subagents.
+        # If subagent support is needed later, re-enable via VESPER-5.
+
+        # Separate system and non-system messages
+        non_system = []
+        for msg in messages:
+            if getattr(msg, "type", None) != "system":
+                non_system.append(msg)
+
+        # Trim conversation history
+        if len(non_system) > self.MAX_MESSAGE_WINDOW:
+            non_system = non_system[-self.MAX_MESSAGE_WINDOW:]
+
+        # VESPER-7: Use fixed ID to prevent SystemMessage accumulation in state.
+        # Without a fixed ID, each before_model call creates a new SystemMessage
+        # with a random UUID. The add_messages reducer appends (not replaces)
+        # messages with new IDs, causing system messages to pile up in state.
+        sys_msg = SystemMessage(content=context, id=_SYSTEM_MSG_ID)
+
+        # VESPER-7: Per-component token logging
+        ctx_tokens = len(context) // 4
+        conv_tokens = sum(
+            len(str(getattr(m, "content", ""))) // 4 for m in non_system
+        )
+        logger.info(
+            "VESPER-7 tokens: system=%d, conv=%d (msgs=%d/%d), total_est=%d",
+            ctx_tokens, conv_tokens, len(non_system), self.MAX_MESSAGE_WINDOW,
+            ctx_tokens + conv_tokens,
+        )
+
+        return {"messages": [sys_msg] + non_system}

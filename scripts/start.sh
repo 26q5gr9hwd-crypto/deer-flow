@@ -6,7 +6,7 @@
 
 set -e
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."\ && pwd)"
 cd "$REPO_ROOT"
 
 # ── Stop existing services ────────────────────────────────────────────────────
@@ -95,14 +95,16 @@ echo "Starting Gateway API..."
 }
 echo "✓ Gateway API started on localhost:8001"
 
+# Frontend is optional for Telegram-only VESPER operation
 echo "Starting Frontend..."
 (cd frontend && pnpm run dev > ../logs/frontend.log 2>&1) &
-./scripts/wait-for-port.sh 3000 120 "Frontend" || {
+if ./scripts/wait-for-port.sh 3000 120 "Frontend"; then
+    echo "✓ Frontend started on localhost:3000"
+else
+    echo "  ⚠ Frontend failed to start — continuing without it (Telegram-only VESPER operation)"
     echo "  See logs/frontend.log for details"
     tail -20 logs/frontend.log
-    cleanup
-}
-echo "✓ Frontend started on localhost:3000"
+fi
 
 echo "Starting Nginx reverse proxy..."
 nginx -g 'daemon off;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" > logs/nginx.log 2>&1 &

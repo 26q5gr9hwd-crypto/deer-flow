@@ -1,11 +1,5 @@
 """Prompt templates for VESPER memory extraction pipeline.
 
-v4 changes (VESPER-17B):
-- Added Section 5: feedback detection with full field definitions
-- Updated empty return template with 4 feedback fields
-- Added feedback signal examples
-- Added "When NOT feedback" rules
-
 v3 changes (VESPER-13):
 - Unified extraction: COMBINED_EXTRACTION_PROMPT now extracts from both user and assistant
 - Removed ASSISTANT_EXTRACTION_PROMPT (redundant separate call)
@@ -26,7 +20,7 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 
-# ─── Combined Extraction Prompt (VESPER v4) ──────────────────────────────────
+# ─── Combined Extraction Prompt (VESPER v3) ──────────────────────────────────
 # Uses __USER_MESSAGE__ and __ASSISTANT_RESPONSE__ as placeholders.
 # Caller must use .replace() — NOT .format() — to fill them in.
 # This allows single braces in JSON examples without escaping issues.
@@ -98,27 +92,6 @@ Examples:
 - "I'm no longer using Hetzner, moved to AWS" -> correction: wrong="Uses Hetzner for hosting", right="Uses AWS for hosting", supersedes_query="Hetzner hosting provider"
 - "Remember, my name is Daniel not Dan" -> correction: wrong="Name is Dan", right="Name is Daniel", supersedes_query="name Dan Daniel"
 
-5. "feedback_detected" — whether the user message contains feedback about the assistant's response quality.
-   Set the following top-level fields (not inside an array):
-   - "feedback_detected" (bool): true if the user is giving feedback about response quality, satisfaction, or behavior
-   - "feedback_score" (float 0.0-5.0): 0.0=very negative, 2.5=neutral, 5.0=very positive. Only meaningful when feedback_detected=true.
-   - "feedback_text" (string): brief summary of the feedback in 1-2 sentences. Empty string if feedback_detected=false.
-   - "contains_followup_question" (bool): true if the user message contains a follow-up question about the assistant's previous response
-
-   Feedback signal examples (set feedback_detected=true):
-   - "That was a great answer!" -> feedback_detected=true, feedback_score=5.0, feedback_text="User praised the response quality."
-   - "This is wrong, you hallucinated" -> feedback_detected=true, feedback_score=0.0, feedback_text="User says the assistant hallucinated."
-   - "Can you be more concise?" -> feedback_detected=true, feedback_score=2.0, feedback_text="User requests more concise responses."
-   - "Perfect, exactly what I needed" -> feedback_detected=true, feedback_score=5.0, feedback_text="User is satisfied with the response."
-   - "You keep repeating yourself" -> feedback_detected=true, feedback_score=1.0, feedback_text="User frustrated by repetition."
-
-   When NOT feedback (set feedback_detected=false):
-   - Questions about topics (not about the response): "What is X?", "How do I do Y?"
-   - Task requests: "Write me a function that...", "Search for..."
-   - Factual corrections about the world: "Actually, Python 3.12 was released in..." (this is a correction, not feedback)
-   - Acknowledgments without quality signal: "ok", "got it", "thanks" (trivial — already skipped)
-   - Follow-up questions about content (set contains_followup_question=true instead): "Can you explain that last part?"
-
 Rules:
 - Be HIGHLY selective. Only extract genuinely useful, specific, NEW information.
 - Prefer fewer high-quality extractions over many low-quality ones.
@@ -152,7 +125,7 @@ Entity naming — use CANONICAL forms:
 - This prevents duplicate graph nodes from case/naming variants
 
 If the user only asks a question with no new factual information, return:
-{"facts": [], "entities": [], "relations": [], "corrections": [], "feedback_detected": false, "feedback_score": 0.0, "feedback_text": "", "contains_followup_question": false}
+{"facts": [], "entities": [], "relations": [], "corrections": []}
 
 Return ONLY valid JSON, no explanation."""
 

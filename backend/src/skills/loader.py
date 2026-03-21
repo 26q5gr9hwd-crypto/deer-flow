@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from .parser import parse_skill_file
@@ -19,7 +20,12 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+def load_skills(
+    skills_path: Path | None = None,
+    use_config: bool = True,
+    enabled_only: bool = False,
+    query: str | None = None,
+) -> list[Skill]:
     """
     Load all skills from the skills directory.
 
@@ -32,6 +38,13 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
                      Otherwise defaults to deer-flow/skills
         use_config: Whether to load skills path from config (default: True)
         enabled_only: If True, only return enabled skills (default: False)
+        query: Optional user message for SkillRL dual-mode semantic retrieval.
+               If provided, filters to the top-k most semantically relevant skills
+               using embedding cosine similarity (vesper_skill_retrieval.py).
+               All skills (static and dynamic) must pass retrieve_relevant_skills()
+               threshold-based retrieval. VESPER-48 + VESPER-64: the _dynamic bypass
+               has been removed -- dynamic skills must pass the same threshold as static.
+               If not provided, returns all skills (fast path / full list).
 
     Returns:
         List of Skill objects, sorted by name
@@ -91,6 +104,26 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     # Filter by enabled status if requested
     if enabled_only:
         skills = [skill for skill in skills if skill.enabled]
+
+    # SkillRL dual-mode retrieval (Phase 4):
+    # Fast path: if no query provided, return full skill list (zero overhead).
+    # Embedding path: if query provided, filter to top-k semantically relevant skills.
+    # VESPER-64 fix: removed '_dynamic' always-inject bypass from loader.py.
+    # Dynamic skills now go through the same retrieve_relevant_skills() threshold
+    # as static skills (VESPER-48 fix in vesper_skill_retrieval.py was already correct;
+    # this loader fix makes it take effect).
+    if query is not None:
+        try:
+            backend_dir = Path(__file__).resolve().parent.parent.parent
+            if str(backend_dir) not in sys.path:
+                sys.path.insert(0, str(backend_dir))
+            from vesper_skill_retrieval import retrieve_relevant_skills
+
+            relevant = retrieve_relevant_skills(query)
+            relevant_names = {r["name"] for r in relevant}
+            skills = [skill for skill in skills if skill.name in relevant_names]
+        except Exception as e:
+            print(f"Warning: Embedding retrieval failed, returning all skills: {e}")
 
     # Sort by name for consistent ordering
     skills.sort(key=lambda s: s.name)

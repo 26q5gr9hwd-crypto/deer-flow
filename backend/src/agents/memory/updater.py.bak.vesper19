@@ -1,0 +1,693 @@
+"""VESPER Memory Extraction Pipeline — updater.py v2.4
+
+Replaces the old JSON-file memory updater with a combined extraction pipeline
+that writes to pgvector (via Mem0) and FalkorDB (entity graph).
+
+Architecture:
+- Two-layer extraction policy: immediate write + debounced write
+- Single LLM call -> typed JSON output (facts + entities + relations + corrections)
+- Facts -> pgvector via Mem0 with metadata (namespace, source_type, confidence, importance, ttl)
+- Entities + relations -> FalkorDB with constrained schema (9 node types, 11 edge types)
+- Extraction is async/background — never blocks user response
+- Single unified extraction from both user messages and assistant responses
+
+v2.4 changes (VESPER-13):
+- Unified extraction: single LLM call extracts from both user and assistant
+- Removed run_assistant_extraction() and _call_assistant_extraction_llm()
+- Removed ASSISTANT_EXTRACTION_PROMPT import
+- Source tagging handled by unified prompt: observed (user) vs inferred (assistant)
+- Increased assistant response context from 500 to 2000 chars for extraction
+
+v2.3 changes (VESPER-11):
+- Bug 1 fix: Added sys.path fix for vesper_memory_config import, load_dotenv with
+  explicit path, print() debug logging for Mem0 operations
+- Bug 2 fix: Hash-based dedup — checks pgvector before mem0.add() to prevent duplicates
+- Bug 3 fix: Added assistant message extraction (technical facts from LLM responses)
+  via new ASSISTANT_EXTRACTION_PROMPT and run_assistant_extraction()
+
+v2.2 changes:
+- Added canonicalize() for case-insensitive graph entity dedup
+- All MERGE operations now match on canonical_name, store display_name separately
+- Lesson nodes now get a name property
+"""
+# VESPER-14: Mem0 writes disabled. Using Graphiti add_episode() via vesper_graphiti module.
+
+
+# VESPER-14: Mem0 writes disabled. Using Graphiti add_episode().
+
+import hashlib
+import json
+import logging
+import os
+import re
+import sys
+import threading
+import unicodedata
+from datetime import datetime
+from typing import Any
+
+# v2.3: Ensure backend root is on sys.path for vesper_memory_config import
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
+
+from src.agents.memory.prompt import COMBINED_EXTRACTION_PROMPT
+from src.config.memory_config import get_memory_config
+
+logger = logging.getLogger(__name__)
+
+# v2.3: Ensure this logger actually outputs (default Python logging has no handlers)
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(name)s] %(levelname)s: %(message)s'))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+
+# Cypher literal brace chars — defined via chr() to avoid Notion template
+# compression of double-brace patterns in source code.
+_LB = chr(123)  # left brace
+_RB = chr(125)  # right brace
+
+
+# ─── Constrained Graph Schema ───────────────────────────────────────────────
+
+NODE_TYPES = frozenset([
+    'Person', 'Project', 'Service', 'Concept', 'Preference',
+    'Lesson', 'Event', 'Artifact', 'Goal',
+])
+
+EDGE_TYPES = frozenset([
+    'prefers', 'uses', 'builds', 'depends_on', 'corrected_by',
+    'learned_from', 'applies_to', 'supersedes', 'related_to',
+    'scheduled_for', 'part_of',
+])
+
+NAMESPACES = frozenset(['profile', 'episodic', 'procedural', 'semantic'])
+SOURCE_TYPES = frozenset(['observed', 'inferred', 'instructed'])
+
+
+# ─── v2.3: Hash-based Dedup ─────────────────────────────────────────────────
+
+try:
+    import psycopg2
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
+_PG_DSN = "host=localhost dbname=vesper user=n8n password=EHYUBBanhcbedheu391318hcehu"
+_written_hashes: set = set()
+
+
+def _compute_fact_hash(text: str) -> str:
+    """Compute a short hash of fact text for dedup."""
+    return hashlib.sha256(text.strip().lower().encode('utf-8')).hexdigest()[:16]
+
+
+def _fact_already_stored(fact_hash):
+    """VESPER-14: pgvector dedup disabled."""
+    return False
+
+
+def canonicalize(name: str) -> str:
+    """Normalize entity name for graph identity matching.
+
+    - casefold for case-insensitive matching
+    - normalize unicode
+    - collapse whitespace
+    - strip
+
+    Display name is stored separately on the node.
+    """
+    name = unicodedata.normalize("NFKC", name)
+    name = name.strip().casefold()
+    name = re.sub(r"\s+", " ", name)
+    return name
+
+
+# ─── Trivial Message & Immediate Trigger Detection ──────────────────────────
+
+TRIVIAL_PATTERNS = [
+    re.compile(
+        r'^(hey|hi|hello|yo|sup|thanks|thx|thank you|ok|okay|k|lol|haha|heh|'
+        r'hmm|mhm|yep|yup|nope|nah|cool|nice|great|awesome|sure|yeah|yes|no|'
+        r'bye|cya|gn|gm|ty|np|gg|brb|afk|wb)[\s!?.]*$',
+        re.IGNORECASE,
+    ),
+    re.compile(r'^\s*[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF'
+               r'\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U0000FE00-\U0000FE0F'
+               r'\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF]+\s*$'),
+]
+
+IMMEDIATE_TRIGGERS = [
+    re.compile(r"(?i)(no,?\s+(i|it|that|we|actually)|not\s+\w+,?\s+(it\'?s|its|i)"
+               r"|actually,?\s+(i|it|that|we)|i\s+meant|i\s+was\s+wrong)"),
+    re.compile(r"(?i)(i\s+prefer|i\s+like|i\s+want|i\s+don\'?t\s+(like|want)"
+               r"|i\s+hate|i\s+love|my\s+favorite|i\s+always\s+use)"),
+    re.compile(r"(?i)(remember\s+(this|that)|note\s+(this|that)|don\'?t\s+forget"
+               r"|keep\s+in\s+mind|fyi|for\s+your\s+info)"),
+    re.compile(r"(?i)(i\s+(ate|eaten|had\s+\w+\s+for|took|feeling|feel\s+\w+"
+               r"|slept|exercised|worked\s+out|ran|walked|weight|sick|tired))"),
+    re.compile(r"(?i)(let\'?s\s+(go|do|use|pick|stick)|we\'?ll\s+(use|go|do)"
+               r"|decided\s+to|going\s+with|i\'?ll\s+go\s+with|switching\s+to)"),
+]
+
+COMMAND_PATTERNS = [
+    re.compile(r'^/(new|status|memory|help|models|fast|projects|tasks)'),
+]
+
+
+def classify_extraction(message: str) -> str:
+    """Classify a user message for extraction policy.
+
+    Returns:
+        'immediate' - extract now (corrections, preferences, health, decisions)
+        'debounced' - extract later (general conversation)
+        'skip' - no extraction (trivial messages, commands)
+    """
+    text = message.strip()
+    if not text or len(text) < 2:
+        return 'skip'
+
+    for pattern in COMMAND_PATTERNS:
+        if pattern.match(text):
+            return 'skip'
+
+    for pattern in TRIVIAL_PATTERNS:
+        if pattern.match(text):
+            return 'skip'
+
+    for pattern in IMMEDIATE_TRIGGERS:
+        if pattern.search(text):
+            return 'immediate'
+
+    return 'debounced'
+
+
+# ─── Singleton Clients ───────────────────────────────────────────────────────
+
+_mem0_client = None
+_mem0_lock = threading.Lock()
+_graph_client = None
+_graph_lock = threading.Lock()
+
+
+def get_mem0_client():
+    """VESPER-14: Mem0 removed. Returns None."""
+    return None
+
+
+def get_graph():
+    """Get or create the FalkorDB graph connection."""
+    global _graph_client
+    with _graph_lock:
+        if _graph_client is None:
+            try:
+                from falkordb import FalkorDB
+                db = FalkorDB(host='localhost', port=6379)
+                _graph_client = db.select_graph('vesper')
+                logger.info("FalkorDB graph 'vesper' connected")
+            except Exception as e:
+                logger.error(f"Failed to connect to FalkorDB: {e}")
+                raise
+        return _graph_client
+
+
+def _escape_cypher(value: str) -> str:
+    """Escape a string for safe use in Cypher queries."""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+
+
+def _cypher_props(**kwargs) -> str:
+    """Build a Cypher property map string like {name: "value"}.
+
+    Uses _LB/_RB to produce literal braces safely.
+    """
+    if not kwargs:
+        return ''
+    pairs = ', '.join(
+        k + ': "' + _escape_cypher(str(v)) + '"'
+        for k, v in kwargs.items()
+    )
+    return _LB + pairs + _RB
+
+
+# ─── Graph Write Helpers ─────────────────────────────────────────────────────
+
+def write_entity_to_graph(entity: dict) -> bool:
+    """Write an entity node to FalkorDB using MERGE on canonical_name."""
+    node_type = entity.get('type', '')
+    if node_type not in NODE_TYPES:
+        logger.warning(f"Rejected unknown node type: {node_type}")
+        return False
+
+    name = entity.get('name', '').strip()
+    if not name:
+        return False
+
+    try:
+        graph = get_graph()
+        canonical = canonicalize(name)
+        esc_name = _escape_cypher(name)
+        props = entity.get('properties', dict())
+        set_parts = [
+            'n.name = "' + esc_name + '"',
+            'n.display_name = "' + esc_name + '"'
+        ]
+        for k, v in props.items():
+            if isinstance(v, (str, int, float, bool)):
+                set_parts.append(
+                    'n.' + _escape_cypher(k) + ' = "' + _escape_cypher(str(v)) + '"')
+
+        set_clause = ' SET ' + ', '.join(set_parts)
+        node_props = _cypher_props(canonical_name=canonical)
+        query = 'MERGE (n:' + node_type + ' ' + node_props + ')' + set_clause
+        graph.query(query)
+        return True
+    except Exception as e:
+        logger.error(f"Graph entity write failed ({node_type}:{name}): {e}")
+        return False
+
+
+def write_relation_to_graph(relation: dict) -> bool:
+    """Write a relation edge to FalkorDB using MERGE on canonical_name."""
+    edge_type = relation.get('edge', '')
+    if edge_type not in EDGE_TYPES:
+        logger.warning(f"Rejected unknown edge type: {edge_type}")
+        return False
+
+    source = relation.get('source', '').strip()
+    source_type = relation.get('source_type', '')
+    target = relation.get('target', '').strip()
+    target_type = relation.get('target_type', '')
+
+    if not source or not target:
+        return False
+    if source_type and source_type not in NODE_TYPES:
+        source_type = ''
+    if target_type and target_type not in NODE_TYPES:
+        target_type = ''
+
+    try:
+        graph = get_graph()
+        canonical_source = canonicalize(source)
+        canonical_target = canonicalize(target)
+        esc_source = _escape_cypher(source)
+        esc_target = _escape_cypher(target)
+
+        src_label = ':' + source_type if source_type else ''
+        tgt_label = ':' + target_type if target_type else ''
+
+        src_props = _cypher_props(canonical_name=canonical_source)
+        tgt_props = _cypher_props(canonical_name=canonical_target)
+
+        props = relation.get('properties', dict())
+        edge_props = ''
+        if props:
+            pp = ', '.join(
+                _escape_cypher(k) + ': "' + _escape_cypher(str(v)) + '"'
+                for k, v in props.items()
+                if isinstance(v, (str, int, float, bool))
+            )
+            if pp:
+                edge_props = ' ' + _LB + pp + _RB
+
+        query = (
+            'MERGE (a' + src_label + ' ' + src_props + ') '
+            'MERGE (b' + tgt_label + ' ' + tgt_props + ') '
+            'MERGE (a)-[:' + edge_type + edge_props + ']->(b) '
+            'SET a.name = "' + esc_source + '", '
+            'a.display_name = "' + esc_source + '", '
+            'b.name = "' + esc_target + '", '
+            'b.display_name = "' + esc_target + '"'
+        )
+        graph.query(query)
+        return True
+    except Exception as e:
+        logger.error(f"Graph relation write failed "
+                     f"({source}-[{edge_type}]->{target}): {e}")
+        return False
+
+
+def write_correction_to_graph(correction: dict) -> bool:
+    """Write a correction as a Lesson node + corrected_by edge."""
+    wrong = correction.get('wrong', '').strip()
+    right = correction.get('right', '').strip()
+    if not right:
+        return False
+
+    now = datetime.utcnow().isoformat() + 'Z'
+    esc_wrong = _escape_cypher(wrong)
+    esc_right = _escape_cypher(right)
+
+    wrong_trunc = wrong[:50] if wrong else '(unknown)'
+    right_trunc = right[:50]
+    lesson_name = 'correction: ' + wrong_trunc + ' -> ' + right_trunc
+    canonical_lesson = canonicalize(lesson_name)
+
+    try:
+        graph = get_graph()
+        person_canonical = canonicalize('Daniel')
+        person_props = _cypher_props(canonical_name=person_canonical)
+        lesson_props = _LB + (
+            'type: "correction", '
+            'name: "' + _escape_cypher(lesson_name) + '", '
+            'canonical_name: "' + _escape_cypher(canonical_lesson) + '", '
+            'wrong: "' + esc_wrong + '", '
+            'right: "' + esc_right + '", '
+            'created_at: "' + now + '"'
+        ) + _RB
+        query = (
+            'MERGE (d:Person ' + person_props + ') '
+            'CREATE (les:Lesson ' + lesson_props + ') '
+            'CREATE (d)-[:corrected_by]->(les) '
+            'SET d.name = "Daniel", d.display_name = "Daniel"'
+        )
+        graph.query(query)
+        return True
+    except Exception as e:
+        logger.error(f"Graph correction write failed: {e}")
+        return False
+
+
+# ─── Extraction LLM ──────────────────────────────────────────────────────────
+
+def _call_extraction_llm(user_message: str, assistant_response: str = '') -> dict:
+    """Call extraction LLM with the combined extraction prompt.
+
+    v2.4: Now extracts from both user message and assistant response.
+    Assistant response limit increased to 2000 chars for extraction quality.
+
+    Returns parsed JSON dict with keys: facts, entities, relations, corrections.
+    Returns empty structure on failure.
+    """
+    empty = dict(facts=[], entities=[], relations=[], corrections=[])
+
+    try:
+        from src.models import create_chat_model
+
+        asst = assistant_response[:2000] if assistant_response else '(none)'
+        prompt = (COMBINED_EXTRACTION_PROMPT
+                  .replace('__USER_MESSAGE__', user_message)
+                  .replace('__ASSISTANT_RESPONSE__', asst))
+
+        model = create_chat_model(name='gpt-oss-120b', thinking_enabled=False)
+        response = model.invoke(prompt)
+        response_text = str(response.content).strip()
+
+        # Strip markdown code blocks if present
+        if response_text.startswith('```'):
+            lines = response_text.split('\n')
+            end_idx = -1 if lines[-1].strip().startswith('```') else len(lines)
+            response_text = '\n'.join(lines[1:end_idx])
+
+        result = json.loads(response_text)
+
+        for key in ('facts', 'entities', 'relations', 'corrections'):
+            if key not in result or not isinstance(result[key], list):
+                result[key] = []
+
+        return result
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Extraction LLM returned invalid JSON: {e}")
+        return empty
+    except Exception as e:
+        logger.error(f"Extraction LLM call failed: {e}")
+        return empty
+
+
+# ─── Main Extraction Pipeline ────────────────────────────────────────────────
+
+def _write_fact_to_mem0(text, fact_hash='', classification='', fact=None):
+    """VESPER-14: Mem0 writes disabled. Graphiti handles storage."""
+    return True
+
+
+def run_extraction(
+    user_message: str,
+    assistant_response: str = '',
+    classification: str = 'debounced',
+) -> dict:
+    """Run the combined extraction pipeline.
+
+    v2.4: Single call extracts from both user message and assistant response.
+
+    1. Call extraction LLM (extracts from both user and assistant)
+    2. Write facts to Mem0/pgvector with metadata (with dedup)
+    3. Write entities + relations to FalkorDB
+    4. Handle corrections (supersede old memories, create Lesson nodes)
+
+    Args:
+        user_message: The user's message text
+        assistant_response: The assistant's response (for context and extraction)
+        classification: 'immediate' or 'debounced'
+
+    Returns:
+        Dict with counts: facts, entities, relations, corrections
+    """
+    counts = dict(facts=0, entities=0, relations=0, corrections=0)
+
+    try:
+        # 1. Call extraction LLM
+        extraction = _call_extraction_llm(user_message, assistant_response)
+
+        if not any(extraction.get(k) for k in (
+            'facts', 'entities', 'relations', 'corrections'
+        )):
+            logger.debug("Extraction returned nothing to write")
+            return counts
+
+        # 2. Write facts to Mem0 (pgvector) with dedup
+        for fact in extraction.get('facts', []):
+            text = fact.get('text', '').strip()
+            if not text:
+                continue
+
+            # v2.3: Dedup check
+            fact_hash = _compute_fact_hash(text)
+            if _fact_already_stored(text, fact_hash):
+                logger.info(f"Dedup: skipping duplicate fact "
+                            f"'{text[:50]}' (hash={fact_hash})")
+                continue
+
+            if _write_fact_to_mem0(text, fact_hash, classification, fact):
+                counts['facts'] += 1
+
+        # 3. Write entities to FalkorDB
+        for entity in extraction.get('entities', []):
+            if write_entity_to_graph(entity):
+                counts['entities'] += 1
+
+        # 4. Write relations to FalkorDB
+        for relation in extraction.get('relations', []):
+            if write_relation_to_graph(relation):
+                counts['relations'] += 1
+
+        # 5. Handle corrections
+        for correction in extraction.get('corrections', []):
+            try:
+                supersedes_query = correction.get('supersedes_query', '')
+                if supersedes_query:
+                    try:
+                        mem0 = get_mem0_client()
+                        old_memories = mem0.search(
+                            supersedes_query, user_id='daniel', limit=3
+                        )
+                        results = (
+                            old_memories.get('results', [])
+                            if isinstance(old_memories, dict)
+                            else old_memories
+                        )
+                        for old in results:
+                            try:
+                                mem_id = (
+                                    old.get('id')
+                                    if isinstance(old, dict)
+                                    else getattr(old, 'id', None)
+                                )
+                                if mem_id:
+                                    mem0.delete(mem_id)
+                                    logger.info(
+                                        f"Superseded old memory: {mem_id}")
+                            except Exception as e:
+                                logger.warning(
+                                    f"Could not delete old memory: {e}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not search for old memories: {e}")
+
+                right_text = correction.get('right', '').strip()
+                if right_text:
+                    try:
+                        mem0 = get_mem0_client()
+                        correction_hash = _compute_fact_hash(right_text)
+                        mem0.add(
+                            right_text,
+                            user_id='daniel',
+                            infer=False,
+                            metadata=dict(
+                                namespace='procedural',
+                                source_type='instructed',
+                                confidence=1.0,
+                                importance=1.0,
+                                is_correction=True,
+                                supersedes=correction.get('wrong', ''),
+                                extracted_at=(
+                                    datetime.utcnow().isoformat() + 'Z'),
+                                fact_hash=correction_hash,
+                            ),
+                        )
+                        _written_hashes.add(correction_hash)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to write correction fact: {e}")
+
+                write_correction_to_graph(correction)
+                counts['corrections'] += 1
+
+            except Exception as e:
+                logger.error(f"Correction handling failed: {e}")
+
+        logger.info(
+            f"Extraction complete ({classification}): "
+            f"{counts['facts']}F {counts['entities']}E "
+            f"{counts['relations']}R {counts['corrections']}C"
+        )
+
+    except Exception as e:
+        logger.error(f"Extraction pipeline failed: {e}")
+        print(f"[VESPER-MEM] Extraction pipeline failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+    return counts
+
+
+# ─── Backward-Compatible Interface ──────────────────────────────────────────
+
+class MemoryUpdater:
+    """Updated MemoryUpdater using the VESPER extraction pipeline.
+
+    Replaces JSON-file storage with Mem0 (pgvector) + FalkorDB (graph).
+    Backward-compatible with the old MemoryUpdater interface used by queue.py.
+    v2.4: Single unified extraction from both user and assistant per turn.
+    """
+
+    def __init__(self, model_name: str | None = None):
+        self._model_name = model_name
+
+    def update_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> bool:
+        """Update memory based on conversation messages.
+
+        v2.4: Single extraction call handles both user and assistant.
+        """
+        config = get_memory_config()
+        if not config.enabled:
+            return False
+
+        if not messages:
+            return False
+
+        try:
+            pairs = []
+            current_user_msg = None
+
+            for msg in messages:
+                role = getattr(msg, 'type', 'unknown')
+                content = getattr(msg, 'content', str(msg))
+
+                if isinstance(content, list):
+                    text_parts = [
+                        p.get('text', '') for p in content
+                        if isinstance(p, dict) and 'text' in p
+                    ]
+                    content = (
+                        ' '.join(text_parts) if text_parts
+                        else str(content))
+
+                content = str(content).strip()
+
+                if role == 'human' and content:
+                    content = re.sub(
+                        r'<uploaded_files>[\s\S]*?</uploaded_files>\n*',
+                        '', content,
+                    ).strip()
+                    if content:
+                        current_user_msg = content
+                elif role == 'ai' and current_user_msg and content:
+                    tool_calls = getattr(msg, 'tool_calls', None)
+                    if not tool_calls:
+                        pairs.append((current_user_msg, content))
+                        current_user_msg = None
+
+            if not pairs:
+                return False
+
+            any_success = False
+
+            # Single pass: unified extraction from both user and assistant
+            for user_msg, assistant_resp in pairs:
+                classification = classify_extraction(user_msg)
+
+                if classification == 'skip':
+                    logger.debug(f"Skipping trivial: {user_msg[:40]}")
+                    continue
+
+                counts = run_extraction(
+                    user_msg, assistant_resp, classification)
+                if any(v > 0 for v in counts.values()):
+                    any_success = True
+
+            return any_success
+
+        except Exception as e:
+            logger.error(f"Memory update failed: {e}")
+            return False
+
+
+def update_memory_from_conversation(
+    messages: list[Any],
+    thread_id: str | None = None,
+    agent_name: str | None = None,
+) -> bool:
+    """Convenience function to update memory from a conversation."""
+    updater = MemoryUpdater()
+    return updater.update_memory(messages, thread_id, agent_name)
+
+
+# ─── Legacy Compatibility Shims ──────────────────────────────────────────────
+
+def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Get memory data. Returns empty structure for v2 compatibility.
+
+    NOTE: In VESPER v2, memory injection is handled by
+    vesper_context_middleware.py which queries Mem0 directly.
+    """
+    return dict(
+        version='2.0',
+        lastUpdated=datetime.utcnow().isoformat() + 'Z',
+        user=dict(
+            workContext=dict(summary='', updatedAt=''),
+            personalContext=dict(summary='', updatedAt=''),
+            topOfMind=dict(summary='', updatedAt=''),
+        ),
+        history=dict(
+            recentMonths=dict(summary='', updatedAt=''),
+            earlierContext=dict(summary='', updatedAt=''),
+            longTermBackground=dict(summary='', updatedAt=''),
+        ),
+        facts=[],
+    )
+
+
+def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Reload memory data. Compatibility shim for v2."""
+    return get_memory_data(agent_name)

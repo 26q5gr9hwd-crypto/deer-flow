@@ -1,0 +1,128 @@
+"""
+VESPER Community Detection — Phase 4
+Builds topic clusters from Graphiti knowledge graph and surfaces community summaries.
+Design doc: VESPER Memory Architecture v2 — Section 4.1 (Graphiti community detection)
+
+VESPER-32: Initial implementation.
+- Calls g.build_communities(group_ids=['vesper']) — Graphiti's built-in detection
+- CommunityNode has .name, .summary, .uuid attributes
+- Returns list of {name, summary, uuid} dicts
+- Wired into consolidation cycle (weekly, not daily — Mondays only)
+- Graceful degradation if Graphiti unavailable
+
+Key design notes:
+- Uses _run_async from vesper_graphiti to run on the persistent event loop
+  (avoids new event loop creation that would break FalkorDB connections)
+- build_communities() is expensive — LLM calls per cluster — run weekly only
+- Weekly gate: only runs on Monday (weekday == 0), pass force=True to override
+"""
+import logging
+import pathlib
+import sys
+from datetime import datetime
+
+from dotenv import load_dotenv
+
+# Load env
+_env_path = pathlib.Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    _env_path2 = pathlib.Path(__file__).resolve().parent / ".env"
+    if _env_path2.exists():
+        load_dotenv(_env_path2)
+    else:
+        load_dotenv()
+
+# Add backend dir to sys.path for vesper_graphiti import
+_backend_dir = pathlib.Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+logging.basicConfig(level=logging.INFO, format='[community-detection] %(message)s')
+logger = logging.getLogger(__name__)
+
+
+def _build_communities_sync(g) -> tuple[list, list]:
+    """
+    Call g.build_communities() on the persistent Graphiti event loop.
+    Uses _run_async from vesper_graphiti to avoid creating a new event loop
+    (avoids FalkorDB connection issues — see VESPER-27).
+    Returns (community_nodes, community_edges) or ([], []) on failure.
+    """
+    from vesper_graphiti import _run_async
+    try:
+        result = _run_async(
+            g.build_communities(group_ids=['vesper']),
+            timeout=300,  # Community detection can be slow — LLM calls per cluster
+        )
+        if result and len(result) == 2:
+            return result[0], result[1]
+        return [], []
+    except Exception as e:
+        logger.error("build_communities failed: %s", e)
+        return [], []
+
+
+def run_community_detection(force: bool = False) -> list[dict]:
+    """
+    Run Graphiti's built-in community detection for the 'vesper' group.
+
+    Designed to run weekly (Mondays only). Pass force=True to override the day check.
+    This function is sync — safe to call from run_consolidation_cycle().
+
+    Returns list of {name, summary, uuid} dicts for detected communities.
+    Returns empty list if Graphiti unavailable, not Monday, or no communities found.
+    """
+    # Weekly gate — community detection is expensive (LLM calls per cluster)
+    if not force:
+        today_weekday = datetime.utcnow().weekday()  # 0 = Monday
+        if today_weekday != 0:
+            logger.info(
+                "Skipping — not Monday (weekday=%d). "
+                "Community detection runs weekly on Mondays.", today_weekday
+            )
+            return []
+
+    from vesper_graphiti import get_graphiti_client
+    g = get_graphiti_client()
+    if g is None:
+        logger.info("Graphiti unavailable, skipping community detection")
+        return []
+
+    logger.info("Building communities (group_id=vesper)...")
+    community_nodes, community_edges = _build_communities_sync(g)
+
+    count = len(community_nodes)
+    logger.info("%d communities detected", count)
+
+    summaries = []
+    for node in community_nodes:
+        name = getattr(node, 'name', '') or ''
+        summary = getattr(node, 'summary', '') or ''
+        uuid = getattr(node, 'uuid', '') or ''
+        summaries.append({'name': name, 'summary': summary, 'uuid': uuid})
+        summary_preview = summary[:80] if summary else '(no summary)'
+        logger.info("  Community: %s — %s...", name, summary_preview)
+
+    if count == 0:
+        logger.info(
+            "No communities detected. "
+            "Expected if the graph has too few nodes or no clear clusters yet."
+        )
+
+    return summaries
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    force = '--force' in _sys.argv
+    if force:
+        print("[community-detection] Force mode — bypassing weekly gate")
+    summaries = run_community_detection(force=force)
+    if summaries:
+        print(f"\n[community-detection] {len(summaries)} communities detected:")
+        for s in summaries:
+            print(f"  - {s['name']}: {s['summary'][:100]}")
+    else:
+        print("[community-detection] No communities detected (Graphiti unavailable, not Monday, or graph too sparse).")

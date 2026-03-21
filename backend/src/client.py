@@ -177,7 +177,7 @@ class DeerFlowClient:
         }
         return RunnableConfig(
             configurable=configurable,
-            recursion_limit=overrides.get("recursion_limit", 100),
+            recursion_limit=overrides.get("recursion_limit", 40),
         )
 
     def _ensure_agent(self, config: RunnableConfig):
@@ -197,6 +197,12 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+
+        # VESPER-6: Force subagent_enabled for vesper agent
+        _agent_name = cfg.get("agent_name", "")
+        if not subagent_enabled and _agent_name and "vesper" in _agent_name.lower():
+            subagent_enabled = True
+            logger.info("VESPER-6: Forced subagent_enabled=True for agent '%s'", _agent_name)
 
         kwargs: dict[str, Any] = {
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),

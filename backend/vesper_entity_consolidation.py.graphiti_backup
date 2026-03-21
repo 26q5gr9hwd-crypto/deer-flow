@@ -1,0 +1,235 @@
+"""
+VESPER Entity Consolidation — Phase 3
+Enriches Graphiti entity summaries using graph neighborhood context.
+Based on Cognee's consolidate_entity_descriptions pattern.
+Design doc: Section 10.8
+
+VESPER-31: Initial implementation.
+Key facts:
+- get_graphiti_client() is SYNC — call from sync code only, NOT from within async
+- _run_async() submits coroutines to the persistent graphiti loop (separate thread)
+- All async DB ops (driver.query) run on the graphiti loop via await
+- LLM calls are sync — use asyncio.to_thread() to avoid blocking the graphiti loop
+- FalkorDB Cypher runs via g.driver.query(cypher, params)
+"""
+import asyncio
+import logging
+import os
+import sys
+import pathlib
+from dotenv import load_dotenv
+
+# Load .env
+_env_path = pathlib.Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    _env_path2 = pathlib.Path(__file__).resolve().parent / ".env"
+    if _env_path2.exists():
+        load_dotenv(_env_path2)
+    else:
+        load_dotenv()
+
+# Add backend dir to sys.path for vesper_graphiti import
+_backend_dir = pathlib.Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+logging.basicConfig(level=logging.INFO, format='[entity-consolidation] %(message)s')
+logger = logging.getLogger(__name__)
+
+MIN_CONNECTIONS_FOR_CONSOLIDATION = 3  # Only enrich entities with 3+ connections
+MAX_ENTITIES_PER_CYCLE = 20           # Don't overload one cycle
+
+
+def _call_llm_sync(messages):
+    """Synchronous LLM call (gpt-oss-120b via OpenRouter). Called via asyncio.to_thread."""
+    from openai import OpenAI
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    model = os.environ.get("VESPER_LLM_MODEL", "openai/gpt-oss-120b")
+    base_url = os.environ.get("VESPER_LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=300,
+    )
+    return response.choices[0].message.content.strip()
+
+
+async def _fetch_entities(g):
+    """
+    Fetch Entity nodes with >= MIN_CONNECTIONS_FOR_CONSOLIDATION edges.
+    Uses FalkorDB Cypher via g.driver.query().
+    Returns list of dicts: {uuid, name, summary, conn_count}
+    """
+    try:
+        result = await g.driver.query(
+            "MATCH (n:Entity) "
+            "OPTIONAL MATCH (n)-[r]-() "
+            "WITH n, count(r) AS conn_count "
+            "WHERE conn_count >= $min_conn "
+            "RETURN n.uuid AS uuid, n.name AS name, "
+            "coalesce(n.summary, '') AS summary, conn_count "
+            "ORDER BY conn_count DESC LIMIT 100",
+            {"min_conn": MIN_CONNECTIONS_FOR_CONSOLIDATION}
+        )
+        entities = []
+        if result:
+            for row in result:
+                if isinstance(row, dict):
+                    entities.append({
+                        "uuid": str(row.get("uuid", "")),
+                        "name": str(row.get("name", "")),
+                        "summary": str(row.get("summary", "")),
+                        "conn_count": int(row.get("conn_count", 0)),
+                    })
+        return entities
+    except Exception as e:
+        logger.warning("_fetch_entities failed: %s", e)
+        return []
+
+
+async def _fetch_neighbors(g, entity_uuid):
+    """
+    Fetch neighbors (up to 15) for a given entity UUID.
+    Returns list of dicts: {neighbor_name, edge_fact}
+    """
+    try:
+        result = await g.driver.query(
+            "MATCH (n:Entity {uuid: $uuid})-[r]-(m:Entity) "
+            "RETURN m.name AS neighbor_name, "
+            "coalesce(r.fact, type(r)) AS edge_fact "
+            "LIMIT 15",
+            {"uuid": entity_uuid}
+        )
+        neighbors = []
+        if result:
+            for row in result:
+                if isinstance(row, dict):
+                    neighbors.append({
+                        "neighbor_name": str(row.get("neighbor_name", "")),
+                        "edge_fact": str(row.get("edge_fact", "")),
+                    })
+        return neighbors
+    except Exception as e:
+        logger.warning("_fetch_neighbors failed for %s: %s", entity_uuid, e)
+        return []
+
+
+async def _update_summary(g, entity_uuid, new_summary):
+    """Update the summary field of an Entity node in FalkorDB via Cypher SET."""
+    try:
+        await g.driver.query(
+            "MATCH (n:Entity {uuid: $uuid}) SET n.summary = $summary",
+            {"uuid": entity_uuid, "summary": new_summary}
+        )
+        return True
+    except Exception as e:
+        logger.warning("_update_summary failed for %s: %s", entity_uuid, e)
+        return False
+
+
+async def _consolidate_one(g, entity):
+    """
+    Cognee pattern for one entity:
+    1. Fetch entity's edges + neighbors from FalkorDB
+    2. Build prompt: "This entity is {name} — {current_summary}.
+       Connected to: {neighbor1} via {edge_fact}, ..."
+    3. LLM (gpt-oss-120b) generates richer summary incorporating relationship context
+    4. Write updated summary back to FalkorDB via MATCH/SET
+    Returns True if updated, False otherwise.
+    """
+    entity_uuid = entity.get("uuid", "")
+    entity_name = entity.get("name", "")
+    current_summary = entity.get("summary", "")
+
+    neighbors = await _fetch_neighbors(g, entity_uuid)
+    if not neighbors:
+        logger.debug("No neighbors for '%s', skipping", entity_name)
+        return False
+
+    # Build neighbor list string
+    neighbor_parts = []
+    for n in neighbors[:10]:
+        nb = n.get("neighbor_name", "")
+        ef = n.get("edge_fact", "")
+        if nb:
+            neighbor_parts.append(f"{nb} ({ef})" if ef else nb)
+    neighbor_list = ", ".join(neighbor_parts) if neighbor_parts else "none"
+
+    prompt = (
+        f"Entity: {entity_name}\n"
+        f"Current summary: {current_summary or 'none'}\n"
+        f"Connected to: {neighbor_list}\n\n"
+        "Write a 2-3 sentence summary of this entity that incorporates its relationships. "
+        "Be specific and factual. Focus on how this entity relates to VESPER's codebase and operation."
+    )
+
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        # Use asyncio.to_thread so LLM call doesn't block the graphiti event loop
+        new_summary = await asyncio.to_thread(_call_llm_sync, messages)
+        if not new_summary or len(new_summary) < 10:
+            return False
+        success = await _update_summary(g, entity_uuid, new_summary)
+        if success:
+            logger.info("Updated entity '%s': %s", entity_name, new_summary[:80])
+        return success
+    except Exception as e:
+        logger.warning("_consolidate_one failed for '%s': %s", entity_name, e)
+        return False
+
+
+async def _run_consolidation(g):
+    """
+    Main async consolidation logic.
+    Runs on the persistent graphiti event loop (submitted via _run_async).
+    """
+    entities = await _fetch_entities(g)
+    print(f"[entity-consolidation] Found {len(entities)} entities to consolidate", flush=True)
+
+    if not entities:
+        print("[entity-consolidation] No entities with sufficient connections found", flush=True)
+        return
+
+    updated = 0
+    for entity in entities[:MAX_ENTITIES_PER_CYCLE]:
+        try:
+            if await _consolidate_one(g, entity):
+                updated += 1
+        except Exception as e:
+            logger.warning("Error consolidating entity '%s': %s", entity.get("name"), e)
+
+    print(f"[entity-consolidation] Updated {updated} entity summaries", flush=True)
+
+
+def run_entity_consolidation():
+    """
+    Sync entry point. Called from vesper_consolidation.py after confidence update cycle.
+
+    Pattern (VESPER-27 compatible):
+    - get_graphiti_client() called here (sync side) — safe, no deadlock
+    - _run_async() submits _run_consolidation(g) to the persistent graphiti loop
+    - The async coroutine does all DB + LLM work without calling _run_async again
+    """
+    try:
+        from vesper_graphiti import get_graphiti_client, _run_async
+    except ImportError as e:
+        logger.error("Cannot import vesper_graphiti: %s", e)
+        return
+
+    g = get_graphiti_client()
+    if g is None:
+        print("[entity-consolidation] Graphiti unavailable, skipping", flush=True)
+        return
+
+    try:
+        _run_async(_run_consolidation(g), timeout=300)
+    except Exception as e:
+        logger.warning("run_entity_consolidation failed: %s", e)
+
+
+if __name__ == "__main__":
+    run_entity_consolidation()

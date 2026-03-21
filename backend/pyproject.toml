@@ -39,6 +39,10 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
+    "graphiti-core[falkordb]>=0.28.0",
+    "fastembed>=0.7.4",
+    "psycopg2-binary>=2.9.11",
+    "falkordb>=1.6.0",
 ]
 
 [dependency-groups]
