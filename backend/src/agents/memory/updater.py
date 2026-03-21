@@ -1,16 +1,19 @@
-"""VESPER Memory Extraction Pipeline — updater.py v3.0
+"""VESPER Memory Extraction Pipeline — updater.py v3.1
 
-Extraction pipeline that produces structured memory data for Graphiti add_episode().
+Extraction pipeline that produces structured memory data for Hindsight retain().
 
 Architecture:
 - Two-layer extraction policy: immediate write + debounced write
 - Single LLM call -> typed JSON output (facts + entities + relations + corrections + feedback)
-- Graphiti handles entity extraction, dedup, and storage via add_episode()
+- Hindsight handles episodic storage via retain()
 - Extraction is async/background — never blocks user response
 - Single unified extraction from both user messages and assistant responses
 
+v3.1 changes (VESPER-FIX-7):
+- Updated stale Graphiti/FalkorDB references in comments to reflect Hindsight
+
 v3.0 changes (VESPER-17B):
-- Removed legacy FalkorDB Cypher write code (Graphiti handles storage)
+- Removed legacy FalkorDB Cypher write code (Hindsight handles episodic storage)
 - Removed dead Mem0 code paths (get_mem0_client, _write_fact_to_mem0, _fact_already_stored)
 - Removed dead dedup code (_compute_fact_hash, psycopg2, _written_hashes)
 - Removed FalkorDB helpers (_escape_cypher, _cypher_props, write_entity/relation/correction_to_graph)
@@ -197,8 +200,8 @@ def run_extraction(
 ) -> dict:
     """Run the combined extraction pipeline.
 
-    v3.0: Extraction only. Graphiti handles storage via add_episode().
-    Returns extraction results including feedback metadata for Graphiti
+    v3.0: Extraction only. Hindsight handles episodic storage via retain().
+    Returns extraction results including feedback metadata for Hindsight
     episode tagging.
 
     Args:
@@ -208,7 +211,7 @@ def run_extraction(
 
     Returns:
         Dict with counts (facts, entities, relations, corrections) plus
-        feedback fields and raw _extraction data for Graphiti episode tagging.
+        feedback fields and raw _extraction data for Hindsight episode tagging.
     """
     result = dict(
         facts=0, entities=0, relations=0, corrections=0,
@@ -232,14 +235,14 @@ def run_extraction(
         result['relations'] = len(extraction.get('relations', []))
         result['corrections'] = len(extraction.get('corrections', []))
 
-        # VESPER-17B: Capture feedback metadata for Graphiti episode tagging
+        # VESPER-17B: Capture feedback metadata for Hindsight episode tagging
         result['feedback_detected'] = extraction.get('feedback_detected', False)
         result['feedback_score'] = extraction.get('feedback_score', 0.0)
         result['feedback_text'] = extraction.get('feedback_text', '')
         result['contains_followup_question'] = extraction.get(
             'contains_followup_question', False)
 
-        # Store raw extraction for callers (e.g. Graphiti episode content)
+        # Store raw extraction for callers (e.g. Hindsight episode content)
         result['_extraction'] = extraction
 
         fb_tag = ''
@@ -268,7 +271,7 @@ def run_extraction(
 class MemoryUpdater:
     """Updated MemoryUpdater using the VESPER extraction pipeline.
 
-    v3.0: Extraction + feedback detection. Graphiti handles storage.
+    v3.1: Extraction + feedback detection. Hindsight handles episodic storage.
     Backward-compatible with the old MemoryUpdater interface used by queue.py.
     """
 
@@ -283,7 +286,7 @@ class MemoryUpdater:
     ) -> bool:
         """Update memory based on conversation messages.
 
-        v3.0: Extraction + feedback. Storage handled by Graphiti.
+        v3.1: Extraction + feedback. Episodic storage handled by Hindsight via retain().
         """
         config = get_memory_config()
         if not config.enabled:
@@ -366,12 +369,19 @@ def update_memory_from_conversation(
 # --- Legacy Compatibility Shims ---
 
 def get_graphiti_client():
-    """Stub for Graphiti client — returns None (used by memory/__init__.py)."""
+    """Legacy stub for Graphiti client (removed in v3.0). Returns None.
+
+    Kept for backward compatibility with memory/__init__.py imports.
+    Graphiti was replaced by Hindsight (vesper_hindsight.py).
+    """
     return None
 
 
 def get_graph():
-    """Stub for FalkorDB graph client — returns None (removed in v3.0, kept for backward compat)."""
+    """Legacy stub for FalkorDB graph client (removed in v3.0). Returns None.
+
+    Kept for backward compatibility. FalkorDB was replaced by Hindsight.
+    """
     return None
 
 
@@ -379,7 +389,7 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get memory data. Returns empty structure for v2+ compatibility.
 
     NOTE: In VESPER v2+, memory injection is handled by
-    vesper_context_middleware.py which queries Graphiti directly.
+    vesper_context_middleware.py which queries Hindsight directly.
     """
     return dict(
         version='3.0',

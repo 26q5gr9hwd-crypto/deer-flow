@@ -1,10 +1,11 @@
 """Memory update queue with debounce mechanism and two-layer extraction policy.
 
-VESPER-27: Wired vesper_hindsight.add_episode() into both extraction paths
+VESPER-27: Wired vesper_hindsight.retain() into both extraction paths
 (_run_immediate_extraction and _process_queue). Previously update_memory()
-extracted facts but never wrote episodes to Graphiti/FalkorDB.
+extracted facts but never wrote episodes to Hindsight.
 """
 
+import asyncio
 import logging
 import re
 import threading
@@ -51,10 +52,10 @@ def _get_last_user_message(messages: list[Any]) -> str | None:
 
 
 def _build_conversation_text(messages: list[Any]) -> str:
-    """Build a plain-text conversation string for Graphiti add_episode().
+    """Build a plain-text conversation string for Hindsight retain().
 
     VESPER-27: Formats the last user+assistant turn (or last few turns)
-    into a single text blob suitable for Graphiti episode ingestion.
+    into a single text blob suitable for Hindsight episodic storage.
     Skips tool-call messages. Falls back to last user message only.
     """
     pairs = []
@@ -182,21 +183,25 @@ class MemoryUpdateQueue:
             status = "succeeded" if success else "skipped/failed"
             logger.info(f"Immediate extraction {status} for thread {thread_id}")
 
-            # VESPER-27: Wire add_episode — write conversation to Graphiti/FalkorDB
+            # Two writes to Hindsight are intentional:
+            # 1. update_memory() above runs structured LLM extraction (facts/entities/
+            #    relations/corrections) — results are logged; persistent storage will
+            #    be wired to Hindsight in a future pass.
+            # 2. retain() below writes raw conversation text for episodic recall.
+            # These are complementary, not duplicates.
             conv_text = _build_conversation_text(messages)
             if conv_text:
-                ep_ok = vesper_hindsight.add_episode(
+                ep_ok = asyncio.run(vesper_hindsight.retain(
                     conv_text,
-                    source_description=f"thread:{thread_id}",
-                    group_id='vesper',
-                )
+                    metadata={"source_description": f"thread:{thread_id}", "group_id": "vesper"},
+                ))
                 if ep_ok:
-                    logger.info(f"[VESPER-27] add_episode OK (immediate) for thread {thread_id}")
-                    print(f"[VESPER-27] add_episode OK (immediate) thread={thread_id}", flush=True)
+                    logger.info(f"[VESPER-27] retain OK (immediate) for thread {thread_id}")
+                    print(f"[VESPER-27] retain OK (immediate) thread={thread_id}", flush=True)
                 else:
-                    logger.warning(f"[VESPER-27] add_episode failed (immediate) for thread {thread_id}")
+                    logger.warning(f"[VESPER-27] retain failed (immediate) for thread {thread_id}")
             else:
-                logger.debug(f"[VESPER-27] No conversation text for add_episode, thread {thread_id}")
+                logger.debug(f"[VESPER-27] No conversation text for retain, thread {thread_id}")
 
         except Exception as e:
             logger.error(f"Immediate extraction error for thread {thread_id}: {e}")
@@ -228,15 +233,13 @@ class MemoryUpdateQueue:
             if not self._queue:
                 return
 
-            self._processing = True
-            contexts_to_process = self._queue.copy()
+            contexts_to_process = list(self._queue)
             self._queue.clear()
-            self._timer = None
-
-        logger.info(f"Processing {len(contexts_to_process)} debounced memory updates")
+            self._processing = True
 
         try:
             updater = MemoryUpdater()
+
             for context in contexts_to_process:
                 try:
                     success = updater.update_memory(
@@ -249,29 +252,33 @@ class MemoryUpdateQueue:
                         f"Debounced extraction {status} for thread {context.thread_id}"
                     )
 
-                    # VESPER-27: Wire add_episode — write conversation to Graphiti/FalkorDB
+                    # Two writes to Hindsight are intentional:
+                    # 1. update_memory() above runs structured LLM extraction (facts/entities/
+                    #    relations/corrections) — results are logged; persistent storage will
+                    #    be wired to Hindsight in a future pass.
+                    # 2. retain() below writes raw conversation text for episodic recall.
+                    # These are complementary, not duplicates.
                     conv_text = _build_conversation_text(context.messages)
                     if conv_text:
-                        ep_ok = vesper_hindsight.add_episode(
+                        ep_ok = asyncio.run(vesper_hindsight.retain(
                             conv_text,
-                            source_description=f"thread:{context.thread_id}",
-                            group_id='vesper',
-                        )
+                            metadata={"source_description": f"thread:{context.thread_id}", "group_id": "vesper"},
+                        ))
                         if ep_ok:
                             logger.info(
-                                f"[VESPER-27] add_episode OK (debounced) for thread {context.thread_id}"
+                                f"[VESPER-27] retain OK (debounced) for thread {context.thread_id}"
                             )
                             print(
-                                f"[VESPER-27] add_episode OK (debounced) thread={context.thread_id}",
+                                f"[VESPER-27] retain OK (debounced) thread={context.thread_id}",
                                 flush=True,
                             )
                         else:
                             logger.warning(
-                                f"[VESPER-27] add_episode failed (debounced) for thread {context.thread_id}"
+                                f"[VESPER-27] retain failed (debounced) for thread {context.thread_id}"
                             )
                     else:
                         logger.debug(
-                            f"[VESPER-27] No conversation text for add_episode, "
+                            f"[VESPER-27] No conversation text for retain, "
                             f"thread {context.thread_id}"
                         )
 
