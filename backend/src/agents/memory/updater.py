@@ -1,4 +1,4 @@
-"""VESPER Memory Extraction Pipeline — updater.py v3.1
+"""VESPER Memory Extraction Pipeline — updater.py v3.2
 
 Extraction pipeline that produces structured memory data for Hindsight retain().
 
@@ -8,6 +8,12 @@ Architecture:
 - Hindsight handles episodic storage via retain()
 - Extraction is async/background — never blocks user response
 - Single unified extraction from both user messages and assistant responses
+
+v3.2 changes (VESPER-FIX-11):
+- Wire structured extraction output to Hindsight retain()
+- Added _write_structured_to_hindsight() helper function
+- update_memory() now calls _write_structured_to_hindsight() after run_extraction()
+- Each fact/entity/relation/correction stored as a typed memory unit in Hindsight
 
 v3.1 changes (VESPER-FIX-7):
 - Updated stale Graphiti/FalkorDB references in comments to reflect Hindsight
@@ -30,6 +36,7 @@ VESPER-40:
 - Added FileHandler -> /tmp/vesper_updater.log for extraction debugging
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -266,11 +273,117 @@ def run_extraction(
     return result
 
 
+# --- VESPER-FIX-11: Structured Extraction Storage ---
+
+def _write_structured_to_hindsight(extraction: dict, thread_id: str | None) -> None:
+    """Write structured extraction items to Hindsight as individual memory units.
+
+    Each fact, entity, relation, and correction is stored as a separate retain()
+    call with:
+      - content: typed string, e.g. "fact: Daniel prefers dark mode"
+      - metadata: {"kind": "<type>", "thread_id": "...", "raw": {...}}
+
+    This wires the LLM's structured output into persistent Hindsight storage so
+    that recall returns specific facts/entities, not just raw conversation blobs.
+    (VESPER-FIX-11)
+    """
+    try:
+        import vesper_hindsight
+
+        items = []
+
+        for fact in extraction.get('facts', []):
+            if isinstance(fact, str):
+                text = fact
+                raw = {'statement': fact}
+            else:
+                text = fact.get('statement', fact.get('text', fact.get('fact', str(fact))))
+                raw = fact
+            if text:
+                items.append({
+                    'content': f"fact: {text}",
+                    'metadata': {'kind': 'fact', 'thread_id': thread_id or '', 'raw': raw},
+                })
+
+        for entity in extraction.get('entities', []):
+            if isinstance(entity, str):
+                text = entity
+                raw = {'name': entity}
+            else:
+                name = entity.get('name', entity.get('entity', ''))
+                etype = entity.get('type', entity.get('entity_type', ''))
+                desc = entity.get('description', entity.get('value', ''))
+                text = name
+                if etype:
+                    text += f" [{etype}]"
+                if desc:
+                    text += f" — {desc}"
+                raw = entity
+            if text:
+                items.append({
+                    'content': f"entity: {text}",
+                    'metadata': {'kind': 'entity', 'thread_id': thread_id or '', 'raw': raw},
+                })
+
+        for relation in extraction.get('relations', []):
+            if isinstance(relation, str):
+                text = relation
+                raw = {'relation': relation}
+            else:
+                subj = relation.get('subject', relation.get('source', relation.get('from', '')))
+                pred = relation.get('predicate', relation.get('relation', relation.get('type', '')))
+                obj = relation.get('object', relation.get('target', relation.get('to', '')))
+                text = f"{subj} {pred} {obj}".strip()
+                raw = relation
+            if text:
+                items.append({
+                    'content': f"relation: {text}",
+                    'metadata': {'kind': 'relation', 'thread_id': thread_id or '', 'raw': raw},
+                })
+
+        for correction in extraction.get('corrections', []):
+            if isinstance(correction, str):
+                text = correction
+                raw = {'correction': correction}
+            else:
+                text = correction.get(
+                    'corrected',
+                    correction.get('correction',
+                    correction.get('statement',
+                    correction.get('text', str(correction)))))
+                raw = correction
+            if text:
+                items.append({
+                    'content': f"correction: {text}",
+                    'metadata': {'kind': 'correction', 'thread_id': thread_id or '', 'raw': raw},
+                })
+
+        if not items:
+            _updater_log.debug("VESPER-FIX-11: no structured items to write")
+            return
+
+        for item in items:
+            asyncio.run(vesper_hindsight.retain(
+                item['content'],
+                metadata=item['metadata'],
+            ))
+
+        _updater_log.info(
+            "VESPER-FIX-11: wrote %d structured items to Hindsight (thread=%s)",
+            len(items), thread_id or 'none',
+        )
+
+    except Exception as e:
+        _updater_log.error(
+            "VESPER-FIX-11: failed to write structured items to Hindsight: %s", e)
+
+
 # --- Backward-Compatible Interface ---
 
 class MemoryUpdater:
     """Updated MemoryUpdater using the VESPER extraction pipeline.
 
+    v3.2: Wires structured extraction output to Hindsight (VESPER-FIX-11).
     v3.1: Extraction + feedback detection. Hindsight handles episodic storage.
     Backward-compatible with the old MemoryUpdater interface used by queue.py.
     """
@@ -286,7 +399,9 @@ class MemoryUpdater:
     ) -> bool:
         """Update memory based on conversation messages.
 
-        v3.1: Extraction + feedback. Episodic storage handled by Hindsight via retain().
+        v3.2: After extraction, calls _write_structured_to_hindsight() to persist
+        each fact/entity/relation/correction as a typed memory unit in Hindsight.
+        Previously the structured extraction was logged but discarded.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -347,6 +462,14 @@ class MemoryUpdater:
                     user_msg, assistant_resp, classification)
                 if any(counts.get(k, 0) > 0 for k in _COUNT_KEYS):
                     any_success = True
+
+                # VESPER-FIX-11: Wire structured extraction output to Hindsight.
+                # Previously run_extraction() returned structured data that was
+                # logged but never persisted. Now each fact/entity/relation/
+                # correction is stored as a typed memory unit via retain().
+                extraction = counts.get('_extraction')
+                if extraction and any(counts.get(k, 0) > 0 for k in _COUNT_KEYS):
+                    _write_structured_to_hindsight(extraction, thread_id)
 
             return any_success
 

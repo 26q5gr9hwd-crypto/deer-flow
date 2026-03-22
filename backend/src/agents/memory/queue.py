@@ -3,6 +3,10 @@
 VESPER-27: Wired vesper_hindsight.retain() into both extraction paths
 (_run_immediate_extraction and _process_queue). Previously update_memory()
 extracted facts but never wrote episodes to Hindsight.
+
+VESPER-FIX-11: Structured extraction (facts/entities/relations/corrections)
+is now also wired to Hindsight via _write_structured_to_hindsight() in
+updater.py. The stale comment about "wired in a future pass" has been removed.
 """
 
 import asyncio
@@ -185,8 +189,8 @@ class MemoryUpdateQueue:
 
             # Two writes to Hindsight are intentional:
             # 1. update_memory() above runs structured LLM extraction (facts/entities/
-            #    relations/corrections) — results are logged; persistent storage will
-            #    be wired to Hindsight in a future pass.
+            #    relations/corrections) — VESPER-FIX-11: now wired to Hindsight via
+            #    _write_structured_to_hindsight() in updater.py.
             # 2. retain() below writes raw conversation text for episodic recall.
             # These are complementary, not duplicates.
             conv_text = _build_conversation_text(messages)
@@ -254,8 +258,8 @@ class MemoryUpdateQueue:
 
                     # Two writes to Hindsight are intentional:
                     # 1. update_memory() above runs structured LLM extraction (facts/entities/
-                    #    relations/corrections) — results are logged; persistent storage will
-                    #    be wired to Hindsight in a future pass.
+                    #    relations/corrections) — VESPER-FIX-11: now wired to Hindsight via
+                    #    _write_structured_to_hindsight() in updater.py.
                     # 2. retain() below writes raw conversation text for episodic recall.
                     # These are complementary, not duplicates.
                     conv_text = _build_conversation_text(context.messages)
