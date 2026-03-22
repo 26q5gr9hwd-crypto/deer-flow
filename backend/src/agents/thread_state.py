@@ -53,3 +53,6 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    # VESPER-FIX-9: Context window expansion — set by expand_context tool
+    # None means use DEFAULT_CONTEXT_WINDOW from VesperContextMiddleware
+    context_window_size: NotRequired[int | None]

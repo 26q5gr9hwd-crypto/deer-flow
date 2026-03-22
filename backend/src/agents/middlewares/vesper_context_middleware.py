@@ -9,7 +9,8 @@ On each model call:
   4. VESPER-45: Injects always-visible capabilities directory (subagents + all skills).
      Placed AFTER identity/soul but BEFORE memories (## Relevant Knowledge).
   5. Appends matched skill content to the context string.
-  6. Trims conversation history to last MAX_MESSAGE_WINDOW messages.
+  6. VESPER-FIX-9: Trims conversation history to last DEFAULT_CONTEXT_WINDOW (10) messages
+     by default. Reads state['context_window_size'] to allow expansion via expand_context tool.
   7. Returns [SystemMessage(context)] + trimmed_non_system.
 
 This keeps the model call small (~800-1,700 tokens context + trimmed history)
@@ -27,6 +28,9 @@ VESPER-45: Added always-visible capabilities directory injected before memories.
            Subagents list is hardcoded; skills list built dynamically at runtime
            from SKILL.md frontmatter. Also adds load_skill tool for on-demand
            full skill content retrieval (registered in tools.py BUILTIN_TOOLS).
+VESPER-FIX-9: Changed MAX_MESSAGE_WINDOW from 15 to DEFAULT_CONTEXT_WINDOW=10.
+              Reads state['context_window_size'] to allow dynamic expansion via
+              the expand_context tool. Full history remains in Postgres checkpointer.
 """
 
 import logging
@@ -50,6 +54,11 @@ _SYSTEM_MSG_ID = "vesper-system-prompt"
 
 # VESPER-45: Skills root path (same as vesper_skill_retrieval.py)
 _SKILLS_ROOT = Path("/opt/deer-flow/skills/custom")
+
+# VESPER-FIX-9: Default number of non-system messages to inject per turn.
+# Full history is always preserved in the Postgres checkpointer.
+# Use expand_context tool to temporarily raise this for a single turn.
+DEFAULT_CONTEXT_WINDOW = 10
 
 # VESPER-45: Hardcoded subagents directory (subagents don't change at runtime)
 _SUBAGENTS_DIRECTORY = """### Subagents (call via task_tool)
@@ -110,12 +119,26 @@ class VesperContextMiddlewareState(AgentState):
 class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
     """Middleware that injects VESPER-specific context before each model call."""
 
-    MAX_MESSAGE_WINDOW = 15
+    # VESPER-FIX-9: Kept for backward compatibility; actual default is DEFAULT_CONTEXT_WINDOW
+    MAX_MESSAGE_WINDOW = DEFAULT_CONTEXT_WINDOW
     state_schema = VesperContextMiddlewareState
 
     @override
     def before_model(self, state, runtime):
         messages = state.get("messages", [])
+
+        # VESPER-FIX-9: Read dynamic context window size from state (set by expand_context tool).
+        # Falls back to DEFAULT_CONTEXT_WINDOW if not set or set to a non-positive value.
+        raw_window = state.get("context_window_size", None)
+        if isinstance(raw_window, int) and raw_window > 0:
+            window_size = raw_window
+            if window_size != DEFAULT_CONTEXT_WINDOW:
+                logger.info(
+                    "VESPER-FIX-9: Using expanded context window: %d (default=%d)",
+                    window_size, DEFAULT_CONTEXT_WINDOW,
+                )
+        else:
+            window_size = DEFAULT_CONTEXT_WINDOW
 
         # Find latest user message for context assembly and skill retrieval
         user_message = ""
@@ -203,9 +226,11 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             if getattr(msg, "type", None) != "system":
                 non_system.append(msg)
 
-        # Trim conversation history
-        if len(non_system) > self.MAX_MESSAGE_WINDOW:
-            non_system = non_system[-self.MAX_MESSAGE_WINDOW:]
+        # VESPER-FIX-9: Trim conversation history to the dynamic window size.
+        # Full history is preserved in the Postgres checkpointer — only the
+        # model's view is trimmed. Use expand_context tool to temporarily expand.
+        if len(non_system) > window_size:
+            non_system = non_system[-window_size:]
 
         # VESPER-7: Use fixed ID to prevent SystemMessage accumulation in state.
         # Without a fixed ID, each before_model call creates a new SystemMessage
@@ -219,8 +244,8 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             len(str(getattr(m, "content", ""))) // 4 for m in non_system
         )
         logger.info(
-            "VESPER-7 tokens: system=%d, conv=%d (msgs=%d/%d), total_est=%d",
-            ctx_tokens, conv_tokens, len(non_system), self.MAX_MESSAGE_WINDOW,
+            "VESPER-FIX-9 tokens: system=%d, conv=%d (msgs=%d/%d window), total_est=%d",
+            ctx_tokens, conv_tokens, len(non_system), window_size,
             ctx_tokens + conv_tokens,
         )
 

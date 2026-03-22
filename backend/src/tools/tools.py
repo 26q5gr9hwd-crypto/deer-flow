@@ -5,6 +5,7 @@ from langchain.tools import BaseTool
 from src.config import get_app_config
 from src.reflection import resolve_variable
 from src.tools.builtins import ask_clarification_tool, load_skill_tool, present_file_tool, task_tool, view_image_tool
+from src.tools.builtins import expand_context_tool, search_message_history_tool
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ BUILTIN_TOOLS = [
 # Always-available tools: included regardless of tool groups
 ALWAYS_TOOLS = [
     load_skill_tool,
+    expand_context_tool,
+    search_message_history_tool,
 ]
 
 SUBAGENT_TOOLS = [
@@ -35,7 +38,7 @@ def get_available_tools(
     When groups is explicitly set, the agent opted into explicit tool control.
     Only config tools in the listed groups are loaded, and default builtin
     tools (ask_clarification, present_file) are skipped to save tokens.
-    load_skill is always included regardless of groups.
+    load_skill, expand_context, and search_message_history are always included regardless of groups.
     """
     logger.info("VESPER-DEBUG: get_available_tools called with groups=%s, subagent_enabled=%s", groups, subagent_enabled)
     config = get_app_config()
@@ -79,9 +82,14 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # VESPER-6: Log exact tool names for debugging
-    # ALWAYS_TOOLS (e.g. load_skill) are added last, always present
     all_tools = loaded_tools + builtin_tools + ALWAYS_TOOLS + mcp_tools
-    tool_names = [getattr(t, "name", str(t)) for t in all_tools]
-    logger.info("VESPER-6: Available tools (%d): %s", len(tool_names), tool_names)
-    return all_tools
+
+    # Deduplicate by tool name (ALWAYS_TOOLS take precedence, last-wins dedup)
+    seen_names: set[str] = set()
+    deduped: list[BaseTool] = []
+    for t in reversed(all_tools):
+        name = getattr(t, "name", None)
+        if name and name not in seen_names:
+            seen_names.add(name)
+            deduped.append(t)
+    return list(reversed(deduped))

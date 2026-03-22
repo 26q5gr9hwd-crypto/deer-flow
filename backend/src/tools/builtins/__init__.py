@@ -1,4 +1,5 @@
 from .clarification_tool import ask_clarification_tool
+from .context_tools import expand_context_tool, search_message_history_tool
 from .load_skill_tool import load_skill_tool
 from .present_file_tool import present_file_tool
 from .setup_agent_tool import setup_agent
@@ -12,4 +13,6 @@ __all__ = [
     "view_image_tool",
     "task_tool",
     "load_skill_tool",
+    "expand_context_tool",
+    "search_message_history_tool",
 ]
