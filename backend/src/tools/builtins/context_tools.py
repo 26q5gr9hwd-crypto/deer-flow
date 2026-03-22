@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Annotated
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import InjectedToolCallId
 from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,10 @@ _POSTGRES_DSN = "postgresql://n8n:EHYUBBanhcbedheu391318hcehu@localhost:5432/ves
 
 
 @tool("expand_context")
-def expand_context_tool(n: int = 20) -> Command:
+def expand_context_tool(
+    n: int = 20,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> Command:
     """Expand the conversation history window for this turn when you need broader context.
 
     Call this when the user references something from earlier in the conversation
@@ -41,7 +47,17 @@ def expand_context_tool(n: int = 20) -> Command:
     """
     clamped = max(10, min(n, _MAX_EXPAND_WINDOW))
     logger.info("VESPER-FIX-9: expand_context called with n=%d (clamped=%d)", n, clamped)
-    return Command(update={"context_window_size": clamped})
+    return Command(
+        update={
+            "context_window_size": clamped,
+            "messages": [
+                ToolMessage(
+                    content=f"Context window expanded to {clamped} messages.",
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        }
+    )
 
 
 @tool("search_message_history")
@@ -206,17 +222,17 @@ def _get_message_content(msg) -> str:
         content = getattr(msg, "content", "")
     if isinstance(content, list):
         parts = []
-        for p in content:
-            if isinstance(p, dict):
-                parts.append(p.get("text", ""))
-            elif isinstance(p, str):
-                parts.append(p)
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
         return " ".join(parts)
     return str(content) if content else ""
 
 
 def _get_message_role(msg) -> str:
-    """Extract role/type from a message (dict or object)."""
+    """Extract role from a message (dict or object)."""
     if isinstance(msg, dict):
-        return msg.get("type", msg.get("role", "unknown"))
+        return msg.get("role", msg.get("type", "unknown"))
     return getattr(msg, "type", getattr(msg, "role", "unknown"))
