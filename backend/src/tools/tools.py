@@ -17,6 +17,14 @@ BUILTIN_TOOLS = [
 # Always-available tools: included regardless of tool groups
 ALWAYS_TOOLS = [
     load_skill_tool,
+]
+
+# VESPER-DIAG-1: Context tools scoped to subagents ONLY.
+# Removed from ALWAYS_TOOLS to prevent the orchestrator (Minimax) from calling
+# expand_context/search_message_history in loops, which grew prompt tokens
+# unboundedly (13k→19k+) and caused finish_reason=length amnesia.
+# Subagents (subagent_enabled=False call path) still get these tools.
+CONTEXT_TOOLS = [
     expand_context_tool,
     search_message_history_tool,
 ]
@@ -38,7 +46,9 @@ def get_available_tools(
     When groups is explicitly set, the agent opted into explicit tool control.
     Only config tools in the listed groups are loaded, and default builtin
     tools (ask_clarification, present_file) are skipped to save tokens.
-    load_skill, expand_context, and search_message_history are always included regardless of groups.
+    load_skill is always included regardless of groups.
+    expand_context and search_message_history are included for subagents only
+    (subagent_enabled=False), NOT for the orchestrator (subagent_enabled=True).
     """
     logger.info("VESPER-DEBUG: get_available_tools called with groups=%s, subagent_enabled=%s", groups, subagent_enabled)
     config = get_app_config()
@@ -82,7 +92,12 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    all_tools = loaded_tools + builtin_tools + ALWAYS_TOOLS + mcp_tools
+    # VESPER-DIAG-1: Context tools only for subagents (subagent_enabled=False),
+    # NOT for the orchestrator (subagent_enabled=True).
+    # This prevents Minimax from looping on expand_context/search_message_history.
+    context_tools = CONTEXT_TOOLS if not subagent_enabled else []
+
+    all_tools = loaded_tools + builtin_tools + ALWAYS_TOOLS + context_tools + mcp_tools
 
     # Deduplicate by tool name (ALWAYS_TOOLS take precedence, last-wins dedup)
     seen_names: set[str] = set()
