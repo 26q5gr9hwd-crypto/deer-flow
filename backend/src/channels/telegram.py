@@ -465,7 +465,7 @@ class TelegramChannel(Channel):
         if reply_to:
             topic_id = str(reply_to.message_id)
         else:
-            topic_id = msg_id
+            topic_id = chat_id  # FIX: use chat_id so all turns in a conversation share the same thread
 
         inbound = self._make_inbound(
             chat_id=chat_id,
