@@ -1,4 +1,4 @@
-"""Context management tools for VESPER — VESPER-FIX-9.
+"""Context management tools for VESPER — VESPER-FIX-9 (patched VESPER-INCIDENT-2).
 
 Provides two tools:
   - expand_context(n): expands the conversation history window for the current turn
@@ -6,6 +6,9 @@ Provides two tools:
 
 These tools let VESPER work efficiently with a small default context window (10 msgs)
 while still being able to access older history when needed.
+
+VESPER-INCIDENT-2 fix: Replaced InjectedToolCallId (not available in langgraph 1.0.x)
+with ToolRuntime, which provides tool_call_id in langgraph 1.0.10.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from typing import Annotated
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.prebuilt import InjectedToolCallId
+from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
@@ -32,7 +35,7 @@ _POSTGRES_DSN = "postgresql://n8n:EHYUBBanhcbedheu391318hcehu@localhost:5432/ves
 @tool("expand_context")
 def expand_context_tool(
     n: int = 20,
-    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    runtime: ToolRuntime = None,
 ) -> Command:
     """Expand the conversation history window for this turn when you need broader context.
 
@@ -46,6 +49,7 @@ def expand_context_tool(
         n: Number of recent messages to load (default 20, max 50)
     """
     clamped = max(10, min(n, _MAX_EXPAND_WINDOW))
+    tool_call_id = (runtime.tool_call_id if runtime is not None else None) or ""
     logger.info("VESPER-FIX-9: expand_context called with n=%d (clamped=%d)", n, clamped)
     return Command(
         update={
@@ -199,40 +203,24 @@ def _deserialize_messages_blob(blob_type: str, blob_data: bytes) -> list | None:
             return raw["messages"]
         return None
     except Exception:
-        pass
-
-    try:
-        # Fallback: try pickle (not ideal but some versions use it)
-        import pickle  # noqa: S403
-        raw = pickle.loads(blob_data)  # noqa: S301
-        if isinstance(raw, list):
-            return raw
         return None
-    except Exception:
-        pass
-
-    return None
 
 
 def _get_message_content(msg) -> str:
-    """Extract text content from a message (dict or object)."""
+    """Extract text content from a message object or dict."""
     if isinstance(msg, dict):
         content = msg.get("content", "")
     else:
         content = getattr(msg, "content", "")
     if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict) and "text" in part:
-                parts.append(part["text"])
-        return " ".join(parts)
+        return " ".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
+        )
     return str(content) if content else ""
 
 
 def _get_message_role(msg) -> str:
-    """Extract role from a message (dict or object)."""
+    """Extract the role/type label from a message object or dict."""
     if isinstance(msg, dict):
-        return msg.get("role", msg.get("type", "unknown"))
+        return msg.get("type", msg.get("role", "unknown"))
     return getattr(msg, "type", getattr(msg, "role", "unknown"))
