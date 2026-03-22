@@ -362,11 +362,27 @@ def _write_structured_to_hindsight(extraction: dict, thread_id: str | None) -> N
             _updater_log.debug("VESPER-FIX-11: no structured items to write")
             return
 
-        for item in items:
-            asyncio.run(vesper_hindsight.retain(
-                item['content'],
-                metadata=item['metadata'],
-            ))
+        async def _retain_all():
+            for item in items:
+                await vesper_hindsight.retain(
+                    item['content'],
+                    metadata=item['metadata'],
+                )
+
+        # asyncio.run() fails if called from within a running event loop
+        # (e.g. LangGraph's async executor). Use a thread to run the coroutine.
+        import concurrent.futures
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, _retain_all())
+                future.result(timeout=30)
+        else:
+            asyncio.run(_retain_all())
 
         _updater_log.info(
             "VESPER-FIX-11: wrote %d structured items to Hindsight (thread=%s)",
