@@ -195,10 +195,21 @@ class MemoryUpdateQueue:
             # These are complementary, not duplicates.
             conv_text = _build_conversation_text(messages)
             if conv_text:
-                ep_ok = asyncio.run(vesper_hindsight.retain(
-                    conv_text,
-                    metadata={"source_description": f"thread:{thread_id}", "group_id": "vesper"},
-                ))
+                import concurrent.futures as _cf
+                async def _do_retain_imm():
+                    return await vesper_hindsight.retain(
+                        conv_text,
+                        metadata={"source_description": f"thread:{thread_id}", "group_id": "vesper"},
+                    )
+                try:
+                    _loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    _loop = None
+                if _loop and _loop.is_running():
+                    with _cf.ThreadPoolExecutor(max_workers=1) as _p:
+                        ep_ok = _p.submit(asyncio.run, _do_retain_imm()).result(timeout=30)
+                else:
+                    ep_ok = asyncio.run(_do_retain_imm())
                 if ep_ok:
                     logger.info(f"[VESPER-27] retain OK (immediate) for thread {thread_id}")
                     print(f"[VESPER-27] retain OK (immediate) thread={thread_id}", flush=True)
@@ -264,10 +275,21 @@ class MemoryUpdateQueue:
                     # These are complementary, not duplicates.
                     conv_text = _build_conversation_text(context.messages)
                     if conv_text:
-                        ep_ok = asyncio.run(vesper_hindsight.retain(
-                            conv_text,
-                            metadata={"source_description": f"thread:{context.thread_id}", "group_id": "vesper"},
-                        ))
+                        import concurrent.futures as _cf2
+                        async def _do_retain_deb():
+                            return await vesper_hindsight.retain(
+                                conv_text,
+                                metadata={"source_description": f"thread:{context.thread_id}", "group_id": "vesper"},
+                            )
+                        try:
+                            _loop2 = asyncio.get_running_loop()
+                        except RuntimeError:
+                            _loop2 = None
+                        if _loop2 and _loop2.is_running():
+                            with _cf2.ThreadPoolExecutor(max_workers=1) as _p2:
+                                ep_ok = _p2.submit(asyncio.run, _do_retain_deb()).result(timeout=30)
+                        else:
+                            ep_ok = asyncio.run(_do_retain_deb())
                         if ep_ok:
                             logger.info(
                                 f"[VESPER-27] retain OK (debounced) for thread {context.thread_id}"
