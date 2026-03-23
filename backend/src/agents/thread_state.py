@@ -1,4 +1,4 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
@@ -24,7 +24,6 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
         return new or []
     if new is None:
         return existing
-    # Use dict.fromkeys to deduplicate while preserving order
     return list(dict.fromkeys(existing + new))
 
 
@@ -38,10 +37,8 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
         return new or {}
     if new is None:
         return existing
-    # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
     return {**existing, **new}
 
 
@@ -52,9 +49,8 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
-    # VESPER-FIX-9: Context window expansion — set by expand_context tool
-    # None means use DEFAULT_CONTEXT_WINDOW from VesperContextMiddleware
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]
     context_window_size: NotRequired[int | None]
     vesper_context_signature: NotRequired[str | None]
     vesper_compiled_context: NotRequired[str | None]
+    vesper_context_snapshot: NotRequired[dict[str, Any] | None]

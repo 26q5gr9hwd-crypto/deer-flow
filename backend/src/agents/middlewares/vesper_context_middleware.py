@@ -16,20 +16,17 @@ Design rules for STAB-2:
 
 import hashlib
 import logging
-from typing import override
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage
 
-from vesper_context import assemble_context
+from vesper_context import assemble_context_details
 
 logger = logging.getLogger(__name__)
 
-# Fixed id keeps exactly one VESPER system prompt in state.
 _SYSTEM_MSG_ID = "vesper-system-prompt"
-
-# Default number of non-system messages to expose unless a context tool expands it.
 DEFAULT_CONTEXT_WINDOW = 10
 
 
@@ -66,9 +63,7 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
         if isinstance(content, str):
             user_message = content
         elif isinstance(content, list):
-            user_message = " ".join(
-                part.get("text", "") for part in content if isinstance(part, dict)
-            )
+            user_message = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
         else:
             user_message = str(content)
 
@@ -76,6 +71,15 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
         digest = hashlib.sha1(user_message.encode("utf-8")).hexdigest()[:12]
         signature = f"human:{human_count}:{msg_id}:{digest}"
         return signature, user_message
+
+    def _decorate_snapshot(self, snapshot: dict[str, Any], *, signature: str, reused: bool, window_size: int, visible_message_count: int) -> dict[str, Any]:
+        enriched = dict(snapshot)
+        enriched["compiled_context_signature"] = signature
+        enriched["compiled_context_reused"] = reused
+        enriched["context_event"] = "reused" if reused else "built"
+        enriched["context_window_size"] = window_size
+        enriched["visible_message_count"] = visible_message_count
+        return enriched
 
     @override
     def before_model(self, state, runtime):
@@ -85,21 +89,33 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
 
         cached_signature = state.get("vesper_context_signature")
         cached_context = state.get("vesper_compiled_context")
+        cached_snapshot = state.get("vesper_context_snapshot")
 
         rebuilt = not (
             isinstance(cached_context, str)
             and cached_context.strip()
+            and isinstance(cached_snapshot, dict)
             and cached_signature == signature
         )
 
         if rebuilt:
-            context = assemble_context(user_message)
+            snapshot = assemble_context_details(user_message)
+            context = snapshot["full_compiled_context"]
         else:
+            snapshot = dict(cached_snapshot)
             context = cached_context
 
         non_system = [msg for msg in messages if getattr(msg, "type", None) != "system"]
         if len(non_system) > window_size:
             non_system = non_system[-window_size:]
+
+        snapshot = self._decorate_snapshot(
+            snapshot,
+            signature=signature,
+            reused=not rebuilt,
+            window_size=window_size,
+            visible_message_count=len(non_system),
+        )
 
         sys_msg = SystemMessage(content=context, id=_SYSTEM_MSG_ID)
 
@@ -115,8 +131,10 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             window_size,
         )
 
-        update = {"messages": [sys_msg] + non_system}
-        if rebuilt:
-            update["vesper_context_signature"] = signature
-            update["vesper_compiled_context"] = context
+        update = {
+            "messages": [sys_msg] + non_system,
+            "vesper_context_signature": signature,
+            "vesper_compiled_context": context,
+            "vesper_context_snapshot": snapshot,
+        }
         return update

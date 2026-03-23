@@ -13,6 +13,7 @@ from src.gateway.routers import (
     mcp,
     memory,
     models,
+    runtime_introspection,
     skills,
     suggestions,
     uploads,
@@ -160,6 +161,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+
+    # Runtime introspection API is mounted at /api/runtime
+    app.include_router(runtime_introspection.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
