@@ -146,8 +146,9 @@ def _build_memories_section(message: str, user_id: str = "daniel",
     semantic + BM25 + graph traversal + community) with structured sectioned output.
 
     VESPER-FIX-1: Fixed two bugs:
-    - Bug 1: search_memories is async; was called without await (returned coroutine).
-      Fix: use asyncio.run() to bridge async->sync correctly.
+    - Bug 1: search_memories is async; a direct asyncio.run() bridge fails inside
+      the live LangGraph event loop. Fix: use a sync wrapper that runs recall in a
+      dedicated thread when a loop is already active.
     - Bug 2: search_memories returns a str, not a (facts, episodes) tuple.
       Fix: capture result as memories_text string directly.
 
@@ -156,11 +157,10 @@ def _build_memories_section(message: str, user_id: str = "daniel",
     - skills_loaded=False: ~600 tokens (num_results=10)
     """
     try:
-        from vesper_hindsight import search_memories as search_memories_structured
+        from vesper_hindsight import search_memories_sync
         num_results = 5 if skills_loaded else 10
 
-        # search_memories is async def -> bridge to sync via asyncio.run()
-        memories_text = asyncio.run(search_memories_structured(message, num_results=num_results))
+        memories_text = search_memories_sync(message, num_results=num_results)
 
         if not memories_text or not memories_text.strip():
             return None
