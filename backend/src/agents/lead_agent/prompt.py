@@ -22,7 +22,7 @@ def _build_subagent_section(max_concurrent: int) -> str:
             if cfg is not None
         )
     except Exception:
-        available_subagents = "- **general-purpose**: For general tasks\n- **bash**: For command execution"
+        available_subagents = "- **web-researcher**: For deep web research\n- **bash**: For command execution\n- **vesper-code-reader**: For codebase exploration\n- **vesper-code-writer**: For code drafting"
 
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
@@ -114,9 +114,9 @@ For complex queries, break them down into focused sub-tasks and execute in paral
 # Thinking: 3 sub-tasks → fits in 1 batch
 
 # Turn 1: Launch 3 subagents in parallel
-task(description="Tencent financial data", prompt="...", subagent_type="general-purpose")
-task(description="Tencent news & regulation", prompt="...", subagent_type="general-purpose")
-task(description="Industry & market trends", prompt="...", subagent_type="general-purpose")
+task(description="Tencent financial data", prompt="...", subagent_type="web-researcher")
+task(description="Tencent news & regulation", prompt="...", subagent_type="web-researcher")
+task(description="Industry & market trends", prompt="...", subagent_type="web-researcher")
 # All 3 run in parallel → synthesize results
 ```
 
@@ -127,14 +127,14 @@ task(description="Industry & market trends", prompt="...", subagent_type="genera
 # Thinking: 5 sub-tasks → need multiple batches (max {n} per batch)
 
 # Turn 1: Launch first batch of {n}
-task(description="AWS analysis", prompt="...", subagent_type="general-purpose")
-task(description="Azure analysis", prompt="...", subagent_type="general-purpose")
-task(description="GCP analysis", prompt="...", subagent_type="general-purpose")
+task(description="AWS analysis", prompt="...", subagent_type="web-researcher")
+task(description="Azure analysis", prompt="...", subagent_type="web-researcher")
+task(description="GCP analysis", prompt="...", subagent_type="web-researcher")
 # Wait for results
 
 # Turn 2: Launch remaining batch
-task(description="Alibaba Cloud analysis", prompt="...", subagent_type="general-purpose")
-task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-purpose")
+task(description="Alibaba Cloud analysis", prompt="...", subagent_type="web-researcher")
+task(description="Oracle Cloud analysis", prompt="...", subagent_type="web-researcher")
 # Wait for results → synthesize all 5
 ```
 

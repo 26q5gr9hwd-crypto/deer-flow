@@ -36,7 +36,7 @@ def task_tool(
     - Execute commands or operations in isolated contexts
 
     Available subagent types are registered dynamically. Common types:
-    - **general-purpose**: Complex multi-step tasks, research, analysis
+    - **web-researcher**: Deep web research across multiple sources
     - **bash**: Command execution (git, build, deploy)
     - **vesper-code-reader**: Read-only code exploration and explanation
     - **vesper-code-writer**: Code change generation (output only, no disk writes)
