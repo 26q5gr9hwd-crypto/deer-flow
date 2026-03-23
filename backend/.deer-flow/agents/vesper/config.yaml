@@ -1,0 +1,14 @@
+# ACTIVE CONFIG — loaded by paths.py (base_dir = backend/.deer-flow when cwd=backend/)
+# This is the canonical config.yaml for the vesper agent.
+# A duplicate exists at backend/agents/vesper/config.yaml (untracked, NOT read by code).
+# Last audited: 2026-03-21 — VESPER-FIX-3 cleanup.
+name: vesper
+description: "VESPER - Daniel's AI assistant"
+model: minimax
+tool_groups:
+  - web
+  - vesper
+subagent_enabled: true
+checkpointer:
+  type: postgres
+  connection_string: postgresql://n8n:EHYUBBanhcbedheu391318hcehu@localhost:5432/vesper
