@@ -1,9 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import { Button } from "@/components/ui/button";
 import {
   ChatBox,
   useSpecificChatMode,
@@ -83,7 +85,14 @@ export default function ChatPage() {
             <div className="flex w-full items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div>
+            <div className="flex items-center gap-2">
+              {!isNewThread ? (
+                <Button asChild size="sm" variant="outline">
+                  <Link href={`/workspace/chats/${threadId}/control-room`}>
+                    Control Room
+                  </Link>
+                </Button>
+              ) : null}
               <ArtifactTrigger />
             </div>
           </header>
