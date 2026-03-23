@@ -1,18 +1,18 @@
 ---
 name: codebase-awareness
-description: "Navigate and understand VESPER's own codebase at /opt/deer-flow. Use\
-  \ when: reading or modifying VESPER source code, understanding module responsibilities,\
-  \ debugging VESPER behavior, planning code changes, delegating to vesper-code-reader\
-  \ or vesper-code-writer, or building a mental model of the system architecture.\
-  \ Covers: directory structure, key modules, service boundaries, the sub-agent\
-  \ delegation pattern for code tasks, and how to efficiently explore unfamiliar code."
+description: "Navigate and understand VESPER's own codebase at /opt/deer-flow. Use
+  when: reading or modifying VESPER source code, understanding module responsibilities,
+  debugging VESPER behavior, planning code changes, delegating to vesper-code-reader
+  or vesper-code-writer, or building a mental model of the system architecture.
+  Covers: directory structure, key modules, service boundaries, the sub-agent
+  delegation pattern for code tasks, and how to efficiently explore unfamiliar code."
 ---
 
 # VESPER Codebase Awareness
 
 ## Architecture Mental Model (~200 tokens)
 
-VESPER is a DeerFlow-based AI agent system. The brain (Minimax) handles reasoning and decisions. Sub-agents (gpt-oss-120b) handle heavy I/O: code reading, code writing, web research. Memory is layered: Hindsight (hindsight-all package, port 8888) for temporal knowledge with bank_id='vesper' and Postgres DB 'vesper', Postgres for operational state + skill embeddings, filesystem for skills (SKILL.md) and identity (SOUL.md). The conversation pipeline: vesper-gateway (port 8001) -> context assembly (middleware) -> brain LLM call -> tool execution -> response. Extraction runs async after each turn via retain() calls to Hindsight.
+VESPER is a DeerFlow-based AI agent system. The brain (GLM-5) handles reasoning and decisions. Sub-agents (gpt-oss-120b) handle heavy I/O: code reading, code writing, web research. Memory is layered: Hindsight (hindsight-all package, port 8888) for temporal knowledge with bank_id='vesper' and Postgres DB 'vesper', Postgres for operational state + skill embeddings, filesystem for skills (SKILL.md) and identity (SOUL.md). The conversation pipeline: vesper-gateway (port 8001) -> context assembly (middleware) -> brain LLM call -> tool execution -> response. Extraction runs async after each turn via retain() calls to Hindsight.
 
 ## Runtime Source of Truth
 
@@ -67,3 +67,10 @@ Hindsight replaced Graphiti+FalkorDB as the memory backend. All memory operation
 - `recall()` -> `POST /v1/default/banks/vesper/memories/recall` — retrieve relevant memories
 
 **Test:**
+
+## Recent Changes (Auto-Updated)
+_Last indexed: 2026-03-23 02:34 UTC_
+
+The update removes the old Mem0 memory backend and re‑routes all structured memory look‑ups to the new **vesper_hindsight** module, which now provides `search_memories_sync` for synchronous calls during context assembly. Additionally, `vesper_context.py` now pulls the SOUL description, current UTC time (with last‑interaction delta), and active Postgres‑stored projects/tasks into the prompt, consolidating all contextual sources into a single ~800‑1,700‑token block. These changes streamline VESPER’s architecture by centralizing memory access through Hindsight and enriching the prompt with up‑to‑date project and timing data, improving relevance while reducing token bloat.
+
+Changed files: backend/vesper_context.py, backend/vesper_hindsight.py

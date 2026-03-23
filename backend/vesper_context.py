@@ -1,7 +1,7 @@
 """VESPER Context Assembly Pipeline.
 
 Assembles structured context for each message:
-SOUL.md + datetime + Postgres projects/tasks + events + Graphiti memories (VESPER-14/22).
+SOUL.md + datetime + Postgres projects/tasks + events + Hindsight memories (post-STAB runtime).
 Target: ~800-1,700 tokens total (down from ~6,500+).
 """
 
@@ -15,7 +15,7 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
-# --- VESPER-14/22: Graphiti memory backend ---
+# --- Hindsight memory backend ---
 # Mem0 removed. Using vesper_hindsight module for search_memories_structured().
 
 
@@ -140,7 +140,7 @@ def _update_last_interaction(conn):
 
 def _build_memories_section(message: str, user_id: str = "daniel",
                              skills_loaded: bool = False) -> str | None:
-    """Build relevant memories section using Graphiti hybrid retrieval.
+    """Build relevant memories section using Hindsight recall retrieval.
 
     VESPER-22: Upgraded to COMBINED_HYBRID_SEARCH_RRF (4-channel hybrid:
     semantic + BM25 + graph traversal + community) with structured sectioned output.
@@ -180,11 +180,11 @@ def assemble_context(message: str, user_id: str = "daniel",
     2. Datetime + delta (~20 tokens) -- always
     3. Active projects + tasks (~100-200 tokens) -- from Postgres
     4. What's changed (~0-100 tokens) -- from Postgres events
-    5. Relevant memories (~300-600 tokens) -- from Graphiti (VESPER-22, hybrid RRF)
+    5. Relevant memories (~300-600 tokens) -- from Hindsight recall
 
     Args:
         message: The user's current message (used for memory retrieval query)
-        user_id: User identifier for Graphiti group
+        user_id: User identifier for Hindsight recall context
         skills_loaded: Whether skills were loaded this turn. When True, memory
                        budget shrinks to ~300 tokens to leave room for skill content.
     """
@@ -218,7 +218,7 @@ def assemble_context(message: str, user_id: str = "daniel",
             except Exception:
                 pass
 
-    # 5. Relevant memories from Graphiti (VESPER-22: hybrid RRF, structured injection)
+    # 5. Relevant memories from Hindsight (structured recall injection)
     mems = _build_memories_section(message, user_id, skills_loaded=skills_loaded)
     if mems:
         sections.append(mems)

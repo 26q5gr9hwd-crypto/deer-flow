@@ -2,8 +2,8 @@
 
 This module provides memory extraction and storage:
 - Extracts facts, entities, and relations from conversations via LLM
-- Stores facts in FalkorDB via Graphiti (VESPER-14)
-- Stores entities and relations in FalkorDB
+- Uses Hindsight-backed memory helpers for current runtime retrieval and storage
+- Preserves legacy compatibility stubs where older imports still exist
 - Handles corrections (supersede old memories)
 - Two-layer extraction: immediate (corrections, preferences) + debounced
 """

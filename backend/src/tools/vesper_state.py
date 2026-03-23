@@ -225,7 +225,7 @@ def search_memory_tool(
     time_range: str | None = None,
     search_type: str = "hybrid",
 ) -> str:
-    """Search long-term memory (Graphiti graph) for relevant facts and context. Tier 2 on-demand retrieval.
+    """Search long-term memory (Hindsight memory service) for relevant facts and context. Tier 2 on-demand retrieval.
 
     Use when: checking history of a specific entity, temporal queries (what did Daniel say about X last week?),
     searching a different angle than what auto-context provided, verifying something before acting.
