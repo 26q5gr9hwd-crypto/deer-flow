@@ -19,8 +19,8 @@ SKILLS_ROOT = Path("/opt/deer-flow/skills/custom")
 def load_skill_tool(skill_name: str) -> str:
     """Load the full content of a named skill file on demand.
 
-    Use this when you see a skill listed in ## Available Capabilities but it
-    wasn't auto-loaded by the retrieval system and you need its full instructions.
+    Use this when you need the full instructions for a named skill that is not
+    already present in the current turn context.
 
     Args:
         skill_name: The skill name exactly as shown in the capabilities directory

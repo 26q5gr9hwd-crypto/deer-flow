@@ -56,3 +56,5 @@ class ThreadState(AgentState):
     # VESPER-FIX-9: Context window expansion — set by expand_context tool
     # None means use DEFAULT_CONTEXT_WINDOW from VesperContextMiddleware
     context_window_size: NotRequired[int | None]
+    vesper_context_signature: NotRequired[str | None]
+    vesper_compiled_context: NotRequired[str | None]
