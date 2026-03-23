@@ -10,7 +10,7 @@ function getBackendBaseUrl() {
 }
 
 export async function GET(
-  request: Request,
+  _request: Request,
   { params }: { params: Promise<{ thread_id: string }> },
 ) {
   const { thread_id } = await params;

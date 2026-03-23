@@ -175,12 +175,9 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
     setError(null);
 
     try {
-      const response = await fetch(
-        `/api/runtime/threads/${threadId}/introspection`,
-        {
-          cache: "no-store",
-        },
-      );
+      const response = await fetch(`/api/runtime/threads/${threadId}/introspection`, {
+        cache: "no-store",
+      });
 
       if (!response.ok) {
         const details = await response.text();
@@ -306,14 +303,10 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
               <Badge variant="outline">Control Room v1</Badge>
               <Badge variant="secondary">Thread {data.thread_id}</Badge>
               {data.run_id ? <Badge variant="outline">Run {data.run_id}</Badge> : null}
-              {data.snapshot_mode ? (
-                <Badge variant="outline">{data.snapshot_mode}</Badge>
-              ) : null}
+              {data.snapshot_mode ? <Badge variant="outline">{data.snapshot_mode}</Badge> : null}
             </div>
             <div>
-              <h1 className="text-3xl font-semibold tracking-tight">
-                VESPER runtime inspector
-              </h1>
+              <h1 className="text-3xl font-semibold tracking-tight">VESPER runtime inspector</h1>
               <p className="mt-2 max-w-4xl text-sm leading-6 text-muted-foreground">
                 A thin control room on top of the OBS-2 introspection surface. It shows what this run saw,
                 what tools and subagents were active, how memory showed up, what happened in sequence,
@@ -417,9 +410,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                           <Badge variant={section.included ? "default" : "outline"}>
                             {section.included ? "Included" : "Skipped"}
                           </Badge>
-                          <Badge variant="outline">
-                            {formatCount(section.approx_tokens)} tokens
-                          </Badge>
+                          <Badge variant="outline">{formatCount(section.approx_tokens)} tokens</Badge>
                         </div>
                         <CardDescription>{section.source ?? "Unknown source"}</CardDescription>
                       </CardHeader>
@@ -489,9 +480,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                     <CardHeader>
                       <div className="flex flex-wrap items-center gap-2">
                         <CardTitle className="text-lg">{subagent.name}</CardTitle>
-                        <Badge variant="outline">
-                          {formatCount(subagent.effective_tools?.length)} tools
-                        </Badge>
+                        <Badge variant="outline">{formatCount(subagent.effective_tools?.length)} tools</Badge>
                       </div>
                       <CardDescription>
                         {subagent.description ?? "No description available."}
@@ -561,9 +550,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                     <CardHeader>
                       <div className="flex flex-wrap items-center gap-2">
                         <CardTitle className="text-lg">Recall event</CardTitle>
-                        <Badge variant="outline">
-                          {formatCount(recallEvent?.result_count)} results
-                        </Badge>
+                        <Badge variant="outline">{formatCount(recallEvent?.result_count)} results</Badge>
                         <Badge variant="outline">
                           {formatCount(recallEvent?.approx_tokens_injected)} prompt tokens
                         </Badge>
@@ -661,25 +648,16 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {timeline.map((event, index) => (
-                    <div
-                      key={`${event.type}-${index}`}
-                      className="rounded-xl border bg-muted/20 p-4"
-                    >
+                    <div key={`${event.type}-${index}`} className="rounded-xl border bg-muted/20 p-4">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant={badgeVariantForEvent(event.type)}>{event.type}</Badge>
                         {event.tool_name ? <Badge variant="outline">{event.tool_name}</Badge> : null}
-                        {event.response_kind ? (
-                          <Badge variant="outline">{event.response_kind}</Badge>
-                        ) : null}
+                        {event.response_kind ? <Badge variant="outline">{event.response_kind}</Badge> : null}
                         {event.prompt_tokens !== undefined ? (
-                          <Badge variant="outline">
-                            {formatCount(event.prompt_tokens)} prompt
-                          </Badge>
+                          <Badge variant="outline">{formatCount(event.prompt_tokens)} prompt</Badge>
                         ) : null}
                         {event.completion_tokens !== undefined ? (
-                          <Badge variant="outline">
-                            {formatCount(event.completion_tokens)} completion
-                          </Badge>
+                          <Badge variant="outline">{formatCount(event.completion_tokens)} completion</Badge>
                         ) : null}
                       </div>
                       <div className="mt-3 grid gap-3 lg:grid-cols-[120px_minmax(0,1fr)]">
