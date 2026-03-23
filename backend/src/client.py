@@ -36,6 +36,7 @@ from langchain_core.runnables import RunnableConfig
 from src.agents.lead_agent.agent import _build_middlewares
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.thread_state import ThreadState
+from src.config.agents_config import load_agent_config
 from src.config.app_config import get_app_config, reload_app_config
 from src.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from src.config.paths import get_paths
@@ -103,8 +104,9 @@ class DeerFlowClient:
         *,
         model_name: str | None = None,
         thinking_enabled: bool = True,
-        subagent_enabled: bool = False,
+        subagent_enabled: bool | None = None,
         plan_mode: bool = False,
+        agent_name: str | None = None,
     ):
         """Initialize the client.
 
@@ -129,6 +131,7 @@ class DeerFlowClient:
         self._thinking_enabled = thinking_enabled
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
+        self._agent_name = agent_name
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -174,6 +177,7 @@ class DeerFlowClient:
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
+            "agent_name": overrides.get("agent_name", self._agent_name),
         }
         return RunnableConfig(
             configurable=configurable,
@@ -188,29 +192,34 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            cfg.get("agent_name"),
         )
 
         if self._agent is not None and self._agent_config_key == key:
             return
 
         thinking_enabled = cfg.get("thinking_enabled", True)
-        model_name = cfg.get("model_name")
-        subagent_enabled = cfg.get("subagent_enabled", False)
+        agent_name = cfg.get("agent_name")
+        agent_config = load_agent_config(agent_name) if agent_name else None
+        model_name = cfg.get("model_name") or (agent_config.model if agent_config and agent_config.model else None)
+        subagent_enabled_override = cfg.get("subagent_enabled", None)
+        configured_subagent_enabled = agent_config.subagent_enabled if agent_config and agent_config.subagent_enabled is not None else False
+        subagent_enabled = configured_subagent_enabled if subagent_enabled_override is None else subagent_enabled_override
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-
-        # VESPER-6: Force subagent_enabled for vesper agent
-        _agent_name = cfg.get("agent_name", "")
-        if not subagent_enabled and _agent_name and "vesper" in _agent_name.lower():
-            subagent_enabled = True
-            logger.info("VESPER-6: Forced subagent_enabled=True for agent '%s'", _agent_name)
 
         kwargs: dict[str, Any] = {
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name),
-            "system_prompt": apply_prompt_template(
+            "tools": self._get_tools(
+                model_name=model_name,
+                groups=agent_config.tool_groups if agent_config else None,
+                agent_role="lead",
+                enable_task_tool=subagent_enabled,
+            ),
+            "middleware": _build_middlewares(config, model_name=model_name, agent_name=agent_name, subagent_enabled=subagent_enabled),
+            "system_prompt": "" if agent_name == "vesper" else apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                agent_name=agent_name,
             ),
             "state_schema": ThreadState,
         }
@@ -227,11 +236,11 @@ class DeerFlowClient:
         logger.info("Agent created: model=%s, thinking=%s", model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(*, model_name: str | None, groups: list[str] | None = None, agent_role: str = "lead", enable_task_tool: bool = False):
         """Lazy import to avoid circular dependency at module level."""
         from src.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(model_name=model_name, groups=groups, agent_role=agent_role, enable_task_tool=enable_task_tool)
 
     @staticmethod
     def _serialize_message(msg) -> dict:

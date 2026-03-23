@@ -100,7 +100,7 @@ def task_tool(
     from src.tools import get_available_tools
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    tools = get_available_tools(model_name=parent_model, agent_role="subagent")
 
     # Create executor
     executor = SubagentExecutor(

@@ -19,11 +19,9 @@ ALWAYS_TOOLS = [
     load_skill_tool,
 ]
 
-# VESPER-DIAG-1: Context tools scoped to subagents ONLY.
-# Removed from ALWAYS_TOOLS to prevent the orchestrator (Minimax) from calling
-# expand_context/search_message_history in loops, which grew prompt tokens
-# unboundedly (13k→19k+) and caused finish_reason=length amnesia.
-# Subagents (subagent_enabled=False call path) still get these tools.
+# Context inspection tools are useful for subagents that need to inspect or
+# expand the parent conversation, but they should not be exposed to the lead
+# orchestrator by default.
 CONTEXT_TOOLS = [
     expand_context_tool,
     search_message_history_tool,
@@ -31,7 +29,7 @@ CONTEXT_TOOLS = [
 
 SUBAGENT_TOOLS = [
     task_tool,
-    # task_status_tool is no longer exposed to LLM (backend handles polling internally)
+    # task_status_tool is no longer exposed to the LLM (backend handles polling internally)
 ]
 
 
@@ -39,18 +37,38 @@ def get_available_tools(
     groups: list[str] | None = None,
     include_mcp: bool = True,
     model_name: str | None = None,
-    subagent_enabled: bool = False,
+    *,
+    agent_role: str = "lead",
+    enable_task_tool: bool = False,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
-    When groups is explicitly set, the agent opted into explicit tool control.
-    Only config tools in the listed groups are loaded, and default builtin
-    tools (ask_clarification, present_file) are skipped to save tokens.
-    load_skill is always included regardless of groups.
-    expand_context and search_message_history are included for subagents only
-    (subagent_enabled=False), NOT for the orchestrator (subagent_enabled=True).
+    Args:
+        groups: Optional tool-group allowlist from config.
+        include_mcp: Whether to include cached MCP tools.
+        model_name: Active model name, used for vision-tool gating.
+        agent_role: Either ``"lead"`` or ``"subagent"``.
+        enable_task_tool: When ``True`` for the lead agent, include the ``task``
+            delegation tool. This should be driven by agent configuration, not by
+            name-based VESPER-only runtime hacks.
+
+    Behavior:
+        - Group-scoped agents skip default builtins like ``ask_clarification`` and
+          ``present_files`` to keep tool schemas lean.
+        - ``load_skill`` is always available.
+        - Subagents get context-inspection tools.
+        - Lead agents only get ``task`` when explicitly enabled.
     """
-    logger.info("VESPER-DEBUG: get_available_tools called with groups=%s, subagent_enabled=%s", groups, subagent_enabled)
+    if agent_role not in {"lead", "subagent"}:
+        raise ValueError(f"Invalid agent_role '{agent_role}'. Expected 'lead' or 'subagent'.")
+
+    logger.info(
+        "Tool routing: groups=%s, agent_role=%s, enable_task_tool=%s",
+        groups,
+        agent_role,
+        enable_task_tool,
+    )
+
     config = get_app_config()
     loaded_tools = [resolve_variable(tool.use, BaseTool) for tool in config.tools if groups is None or tool.group in groups]
 
@@ -65,22 +83,23 @@ def get_available_tools(
             if extensions_config.get_enabled_mcp_servers():
                 mcp_tools = get_cached_mcp_tools()
                 if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+                    logger.info("Using %s cached MCP tool(s)", len(mcp_tools))
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+            logger.error("Failed to get cached MCP tools: %s", e)
 
-    # When groups is explicitly set, skip default builtins to save tokens.
-    # Agents without tool_groups get all builtins as before.
-    builtin_tools = []
+    builtin_tools: list[BaseTool] = []
     if groups is None:
-        builtin_tools = BUILTIN_TOOLS.copy()
+        builtin_tools.extend(BUILTIN_TOOLS)
 
-    # Add subagent tools only if enabled via runtime parameter
-    if subagent_enabled:
+    if agent_role == "lead" and enable_task_tool:
         builtin_tools.extend(SUBAGENT_TOOLS)
-        logger.info("Including subagent tools (task)")
+        logger.info("Including task delegation tool for lead agent")
+
+    if agent_role == "subagent":
+        builtin_tools.extend(CONTEXT_TOOLS)
+        logger.info("Including context tools for subagent")
 
     # If no model_name specified, use the first model (default)
     if model_name is None and config.models:
@@ -90,14 +109,9 @@ def get_available_tools(
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
-        logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        logger.info("Including view_image_tool for model '%s' (supports_vision=True)", model_name)
 
-    # VESPER-DIAG-1: Context tools only for subagents (subagent_enabled=False),
-    # NOT for the orchestrator (subagent_enabled=True).
-    # This prevents Minimax from looping on expand_context/search_message_history.
-    context_tools = CONTEXT_TOOLS if not subagent_enabled else []
-
-    all_tools = loaded_tools + builtin_tools + ALWAYS_TOOLS + context_tools + mcp_tools
+    all_tools = loaded_tools + builtin_tools + ALWAYS_TOOLS + mcp_tools
 
     # Deduplicate by tool name (ALWAYS_TOOLS take precedence, last-wins dedup)
     seen_names: set[str] = set()

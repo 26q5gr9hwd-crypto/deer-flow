@@ -205,7 +205,12 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
+def _build_middlewares(
+    config: RunnableConfig,
+    model_name: str | None,
+    agent_name: str | None = None,
+    subagent_enabled: bool = False,
+):
     """Build middleware chain based on runtime configuration.
 
     Args:
@@ -245,12 +250,6 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         middlewares.append(ViewImageMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
-    # VESPER-6: Force subagent_enabled for vesper agent
-    if not subagent_enabled:
-        _mw_agent_name = config.get("configurable", {}).get("agent_name", "")
-        if _mw_agent_name and "vesper" in _mw_agent_name.lower():
-            subagent_enabled = True
     if subagent_enabled:
         max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
@@ -271,17 +270,15 @@ def make_lead_agent(config: RunnableConfig):
     reasoning_effort = cfg.get("reasoning_effort", None)
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    subagent_enabled_override = cfg.get("subagent_enabled", None)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name") or "vesper"
 
-    # VESPER-6: Force subagent_enabled for vesper agent to enable task_tool delegation
-    if not subagent_enabled and agent_name and "vesper" in agent_name.lower():
-        subagent_enabled = True
-        logger.info("VESPER-6: Forced subagent_enabled=True for agent '%s'", agent_name)
-
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    configured_subagent_enabled = agent_config.subagent_enabled if agent_config and agent_config.subagent_enabled is not None else False
+    subagent_enabled = configured_subagent_enabled if subagent_enabled_override is None else subagent_enabled_override
+
     # Custom agent model or fallback to global/default model resolution
     agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
 
@@ -329,8 +326,8 @@ def make_lead_agent(config: RunnableConfig):
 
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name),
+            tools=get_available_tools(model_name=model_name, agent_role="lead", enable_task_tool=subagent_enabled) + [setup_agent],
+            middleware=_build_middlewares(config, model_name=model_name, subagent_enabled=subagent_enabled),
             system_prompt=system_prompt,
             state_schema=ThreadState,
         )
@@ -338,8 +335,8 @@ def make_lead_agent(config: RunnableConfig):
     # Default lead agent (unchanged behavior)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
-        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, agent_role="lead", enable_task_tool=subagent_enabled),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, subagent_enabled=subagent_enabled),
         system_prompt="" if agent_name == "vesper" else apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
     )
