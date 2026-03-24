@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -169,6 +169,13 @@ function formatCount(value?: number | null) {
   return new Intl.NumberFormat().format(value);
 }
 
+function formatTokenCount(value?: number | null, options?: { approximate?: boolean }) {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  return `${options?.approximate ? "~" : ""}${formatCount(value)} tokens`;
+}
+
 function formatBoolean(value?: boolean | null) {
   if (value === null || value === undefined) {
     return "Unknown";
@@ -248,7 +255,7 @@ function MetricCard({
 export function ControlRoomView({ threadId }: { threadId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const selectedRunId = searchParams.get("run_id") || "";
+  const selectedRunId = searchParams.get("run_id") ?? "";
 
   const [data, setData] = useState<RuntimeIntrospection | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -286,13 +293,18 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
   const contextSnapshot = data?.context_snapshot;
   const sections = contextSnapshot?.sections ?? [];
   const lead = data?.lead;
-  const subagents = data?.subagents ?? [];
-  const loadEvents = data?.skills?.load_events ?? [];
+  const subagents = useMemo(() => data?.subagents ?? [], [data?.subagents]);
+  const loadEvents = useMemo(() => data?.skills?.load_events ?? [], [data?.skills?.load_events]);
   const recallEvent = data?.memory?.recall_event;
   const retainEvents = data?.memory?.retain_events ?? [];
   const timeline = data?.timeline ?? [];
   const runHistory = data?.run_history ?? [];
   const tokenAccounting = data?.token_accounting;
+  const leadToolCount = lead?.effective_tools?.length ?? 0;
+  const subagentToolCount = useMemo(
+    () => subagents.reduce((sum, subagent) => sum + (subagent.effective_tools?.length ?? 0), 0),
+    [subagents],
+  );
 
   const loadedSkillNames = useMemo(() => {
     return Array.from(
@@ -560,24 +572,24 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                           <CardContent className="space-y-4">
                             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                               <MetricCard
-                                label="Visible estimate"
-                                value={`${formatCount(tokenAccounting.visible_estimate_total)} tokens`}
-                                helper="Approximate total of compiled context, conversation history, tool schemas, and tool/result history."
+                                label="Approx. visible prompt"
+                                value={formatTokenCount(tokenAccounting.visible_estimate_total, { approximate: true })}
+                                helper="Approximate sum of compiled context, conversation/history, lead-agent tool schemas, and tool/result history."
                               />
                               <MetricCard
-                                label="Provider prompt"
-                                value={`${formatCount(tokenAccounting.provider_prompt_tokens?.latest)} tokens`}
+                                label="Provider prompt total"
+                                value={formatTokenCount(tokenAccounting.provider_prompt_tokens?.latest)}
                                 helper={`${formatCount(tokenAccounting.provider_prompt_tokens?.llm_call_count)} LLM calls surfaced provider prompt totals.`}
                               />
                               <MetricCard
-                                label="Tool schemas"
-                                value={`${formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens`}
-                                helper={`${formatCount(tokenAccounting.tool_schemas?.tool_count)} live tool schemas currently counted.`}
+                                label="Lead tool schemas"
+                                value={formatTokenCount(tokenAccounting.tool_schemas?.approx_tokens, { approximate: true })}
+                                helper={`${formatCount(tokenAccounting.tool_schemas?.tool_count)} lead-agent schemas only. Subagent tools are counted separately below.`}
                               />
                               <MetricCard
-                                label="Tool loop history"
-                                value={`${formatCount((tokenAccounting.tool_call_history?.approx_tokens ?? 0) + (tokenAccounting.tool_result_history?.approx_tokens ?? 0))} tokens`}
-                                helper={`${formatCount(tokenAccounting.tool_call_history?.event_count)} calls and ${formatCount(tokenAccounting.tool_result_history?.event_count)} results.`}
+                                label="Tool/result history"
+                                value={formatTokenCount((tokenAccounting.tool_call_history?.approx_tokens ?? 0) + (tokenAccounting.tool_result_history?.approx_tokens ?? 0), { approximate: true })}
+                                helper={`${formatCount(tokenAccounting.tool_call_history?.event_count)} tool calls and ${formatCount(tokenAccounting.tool_result_history?.event_count)} tool results.`}
                               />
                             </div>
               
@@ -588,51 +600,80 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                             <div className="grid gap-4 xl:grid-cols-2">
                               <Card className="gap-3 bg-muted/20">
                                 <CardHeader>
-                                  <CardTitle className="text-lg">Visible sources</CardTitle>
-                                  <CardDescription>These numbers explain why compiled context is only one part of the final provider prompt.</CardDescription>
+                                  <CardTitle className="text-lg">Visible prompt pieces</CardTitle>
+                                  <CardDescription>
+                                    These are the prompt components Control Room can explain directly from the selected run. Token counts here are approximate.
+                                  </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-3 text-sm text-muted-foreground">
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
                                     <span>Compiled context</span>
-                                    <span>{formatCount(tokenAccounting.compiled_context?.approx_tokens)} tokens</span>
+                                    <span>{formatTokenCount(tokenAccounting.compiled_context?.approx_tokens, { approximate: true })}</span>
                                   </div>
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                                    <span>Conversation history</span>
-                                    <span>{formatCount(tokenAccounting.conversation_history?.approx_tokens)} tokens</span>
+                                    <span>Conversation/history</span>
+                                    <span>{formatTokenCount(tokenAccounting.conversation_history?.approx_tokens, { approximate: true })}</span>
                                   </div>
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                                    <span>Tool schemas</span>
-                                    <span>{formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens</span>
+                                    <span>Lead-agent tool schemas</span>
+                                    <span>{formatTokenCount(tokenAccounting.tool_schemas?.approx_tokens, { approximate: true })}</span>
                                   </div>
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
                                     <span>Tool call history</span>
-                                    <span>{formatCount(tokenAccounting.tool_call_history?.approx_tokens)} tokens</span>
+                                    <span>{formatTokenCount(tokenAccounting.tool_call_history?.approx_tokens, { approximate: true })}</span>
                                   </div>
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
                                     <span>Tool result history</span>
-                                    <span>{formatCount(tokenAccounting.tool_result_history?.approx_tokens)} tokens</span>
+                                    <span>{formatTokenCount(tokenAccounting.tool_result_history?.approx_tokens, { approximate: true })}</span>
                                   </div>
                                   <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 font-medium text-foreground">
-                                    <span>Latest provider gap</span>
-                                    <span>{formatCount(tokenAccounting.latest_provider_gap)} tokens</span>
+                                    <span>Approx. gap to provider prompt</span>
+                                    <span>{formatTokenCount(tokenAccounting.latest_provider_gap, { approximate: true })}</span>
                                   </div>
                                 </CardContent>
                               </Card>
-              
+
                               <Card className="gap-3 bg-muted/20">
                                 <CardHeader>
-                                  <CardTitle className="text-lg">Warnings and limits</CardTitle>
-                                  <CardDescription>Control Room now states clearly when values are approximate or derived.</CardDescription>
+                                  <CardTitle className="text-lg">Provider-reported totals</CardTitle>
+                                  <CardDescription>
+                                    These values come from model response metadata when the provider surfaces them. They are the strongest totals available for the selected run.
+                                  </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-3 text-sm text-muted-foreground">
-                                  {(tokenAccounting.warnings ?? []).map((warning, index) => (
-                                    <p key={index} className="rounded-lg border bg-background p-3">
-                                      {warning}
-                                    </p>
-                                  ))}
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Prompt input</span>
+                                    <span>{formatTokenCount(tokenAccounting.provider_prompt_tokens?.latest)}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Completion output</span>
+                                    <span>{formatTokenCount(tokenAccounting.provider_completion_tokens?.latest)}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 font-medium text-foreground">
+                                    <span>Total tokens</span>
+                                    <span>{formatTokenCount(tokenAccounting.provider_total_tokens?.latest)}</span>
+                                  </div>
+                                  <div className="rounded-lg border bg-background p-3 text-xs leading-6">
+                                    <strong className="text-foreground">Calls with provider totals:</strong>{" "}
+                                    {formatCount(tokenAccounting.provider_total_tokens?.llm_call_count)}
+                                  </div>
                                 </CardContent>
                               </Card>
                             </div>
+
+                            <Card className="gap-3 bg-muted/20">
+                              <CardHeader>
+                                <CardTitle className="text-lg">Warnings and limits</CardTitle>
+                                <CardDescription>Control Room now states clearly when values are approximate or derived.</CardDescription>
+                              </CardHeader>
+                              <CardContent className="space-y-3 text-sm text-muted-foreground">
+                                {(tokenAccounting.warnings ?? []).map((warning, index) => (
+                                  <p key={index} className="rounded-lg border bg-background p-3">
+                                    {warning}
+                                  </p>
+                                ))}
+                              </CardContent>
+                            </Card>
                           </CardContent>
                         </Card>
                       ) : null}
@@ -710,12 +751,32 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
             <TabsContent value="tools" className="space-y-4">
               <Card>
                 <CardHeader>
-                  <CardTitle>Lead agent capability map</CardTitle>
+                  <CardTitle>Lead agent tool set</CardTitle>
                   <CardDescription>
-                    Tooling and delegation state for the selected run snapshot. Legacy runs may show current runtime reconstruction.
+                    Lead-agent tools for the selected run snapshot. Subagent tools are listed separately below and are not counted as lead tools.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <div className="text-xs font-medium uppercase tracking-wide text-foreground">Lead tools</div>
+                      <div className="mt-1 text-2xl font-semibold text-foreground">{formatCount(leadToolCount)}</div>
+                      <p className="mt-2">Counted from the live lead-agent tool set only.</p>
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <div className="text-xs font-medium uppercase tracking-wide text-foreground">Lead schema footprint</div>
+                      <div className="mt-1 text-2xl font-semibold text-foreground">
+                        {formatTokenCount(lead?.tool_schema_snapshot?.approx_tokens, { approximate: true })}
+                      </div>
+                      <p className="mt-2">Approximate size of lead-agent tool schemas only.</p>
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <div className="text-xs font-medium uppercase tracking-wide text-foreground">Subagent tools</div>
+                      <div className="mt-1 text-2xl font-semibold text-foreground">{formatCount(subagentToolCount)}</div>
+                      <p className="mt-2">Across {formatCount(subagents.length)} subagents, shown separately below.</p>
+                    </div>
+                  </div>
+
                   <div className="flex flex-wrap gap-2">
                     {(lead?.tool_groups ?? []).map((toolGroup) => (
                       <Badge key={toolGroup} variant="secondary">
@@ -735,6 +796,10 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                   </p>
                 </CardContent>
               </Card>
+
+              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <strong className="text-foreground">Subagent tool sets</strong> are shown in separate cards below so the top-level lead-agent summary does not imply that delegated tools belong to the main agent.
+              </div>
 
               <div className="grid gap-4 xl:grid-cols-2">
                 {subagents.map((subagent) => (
