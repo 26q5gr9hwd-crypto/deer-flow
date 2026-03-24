@@ -28,6 +28,7 @@ type ContextSection = {
 
 type TimelineEvent = {
   index?: number;
+  sequence?: number;
   type: string;
   preview?: string;
   tool_name?: string;
@@ -35,8 +36,12 @@ type TimelineEvent = {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  approx_tokens?: number;
   tool_call_count?: number;
   response_kind?: string;
+  cost?: number;
+  evidence?: string;
+  approximate?: boolean;
   args?: Record<string, unknown>;
 };
 
@@ -49,6 +54,37 @@ type RunHistoryItem = {
   checkpoint_count?: number;
   latest_step?: number;
   snapshot_fidelity?: string;
+};
+
+type TokenGroup = {
+  approx_tokens?: number;
+  section_count?: number;
+  message_count?: number;
+  event_count?: number;
+  tool_count?: number;
+  llm_call_count?: number;
+  schema_chars?: number;
+  derived_from?: string;
+  latest?: number | null;
+  max?: number | null;
+  sum?: number | null;
+  sections?: Array<{ section_key?: string; approx_tokens?: number; source?: string }>;
+  tools?: Array<{ name: string; approx_tokens?: number; schema_available?: boolean }>;
+};
+
+type TokenAccounting = {
+  compiled_context?: TokenGroup;
+  conversation_history?: TokenGroup;
+  tool_schemas?: TokenGroup;
+  tool_call_history?: TokenGroup;
+  tool_result_history?: TokenGroup;
+  provider_prompt_tokens?: TokenGroup;
+  provider_completion_tokens?: TokenGroup;
+  provider_total_tokens?: TokenGroup;
+  visible_estimate_total?: number;
+  latest_provider_gap?: number | null;
+  explanation?: string;
+  warnings?: string[];
 };
 
 type RuntimeIntrospection = {
@@ -77,6 +113,19 @@ type RuntimeIntrospection = {
     effective_tools?: string[];
     subagent_enabled?: boolean;
     config_path?: string;
+    tool_schema_snapshot?: {
+      tool_count?: number;
+      approx_tokens?: number;
+      schema_chars?: number;
+      derived_from?: string;
+      tools?: Array<{
+        name: string;
+        description_chars?: number;
+        schema_chars?: number;
+        approx_tokens?: number;
+        schema_available?: boolean;
+      }>;
+    };
   };
   subagents?: Array<{
     name: string;
@@ -110,6 +159,7 @@ type RuntimeIntrospection = {
   timeline?: TimelineEvent[];
   source_of_truth?: string[];
   selected_run_message_count?: number;
+  token_accounting?: TokenAccounting;
 };
 
 function formatCount(value?: number | null) {
@@ -242,6 +292,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
   const retainEvents = data?.memory?.retain_events ?? [];
   const timeline = data?.timeline ?? [];
   const runHistory = data?.run_history ?? [];
+  const tokenAccounting = data?.token_accounting;
 
   const loadedSkillNames = useMemo(() => {
     return Array.from(
@@ -480,6 +531,94 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                   {warning}
                 </p>
               ))}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {tokenAccounting ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Token accounting</CardTitle>
+              <CardDescription>
+                Compiled context, conversation history, tool schemas, tool calls, tool results, and provider totals are separated for the selected run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <MetricCard
+                  label="Visible estimate"
+                  value={`${formatCount(tokenAccounting.visible_estimate_total)} tokens`}
+                  helper="Approximate total of compiled context, conversation history, tool schemas, and tool/result history."
+                />
+                <MetricCard
+                  label="Provider prompt"
+                  value={`${formatCount(tokenAccounting.provider_prompt_tokens?.latest)} tokens`}
+                  helper={`${formatCount(tokenAccounting.provider_prompt_tokens?.llm_call_count)} LLM calls surfaced provider prompt totals.`}
+                />
+                <MetricCard
+                  label="Tool schemas"
+                  value={`${formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens`}
+                  helper={`${formatCount(tokenAccounting.tool_schemas?.tool_count)} live tool schemas currently counted.`}
+                />
+                <MetricCard
+                  label="Tool loop history"
+                  value={`${formatCount((tokenAccounting.tool_call_history?.approx_tokens ?? 0) + (tokenAccounting.tool_result_history?.approx_tokens ?? 0))} tokens`}
+                  helper={`${formatCount(tokenAccounting.tool_call_history?.event_count)} calls and ${formatCount(tokenAccounting.tool_result_history?.event_count)} results.`}
+                />
+              </div>
+
+              <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <p>{tokenAccounting.explanation ?? "No token accounting explanation available."}</p>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <Card className="gap-3 bg-muted/20">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Visible sources</CardTitle>
+                    <CardDescription>These numbers explain why compiled context is only one part of the final provider prompt.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm text-muted-foreground">
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                      <span>Compiled context</span>
+                      <span>{formatCount(tokenAccounting.compiled_context?.approx_tokens)} tokens</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                      <span>Conversation history</span>
+                      <span>{formatCount(tokenAccounting.conversation_history?.approx_tokens)} tokens</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                      <span>Tool schemas</span>
+                      <span>{formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                      <span>Tool call history</span>
+                      <span>{formatCount(tokenAccounting.tool_call_history?.approx_tokens)} tokens</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                      <span>Tool result history</span>
+                      <span>{formatCount(tokenAccounting.tool_result_history?.approx_tokens)} tokens</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 font-medium text-foreground">
+                      <span>Latest provider gap</span>
+                      <span>{formatCount(tokenAccounting.latest_provider_gap)} tokens</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="gap-3 bg-muted/20">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Warnings and limits</CardTitle>
+                    <CardDescription>Control Room now states clearly when values are approximate or derived.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm text-muted-foreground">
+                    {(tokenAccounting.warnings ?? []).map((warning, index) => (
+                      <p key={index} className="rounded-lg border bg-background p-3">
+                        {warning}
+                      </p>
+                    ))}
+                  </CardContent>
+                </Card>
+              </div>
             </CardContent>
           </Card>
         ) : null}
@@ -765,7 +904,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Chronological runtime trace</CardTitle>
                   <CardDescription>
-                    Timeline built from the selected run checkpoint rather than only the latest turn on the thread.
+                    Context build, recall, delegation, tool calls, tool results, and provider-token-backed LLM calls are shown in selected-run order.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -781,9 +920,17 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                         {event.completion_tokens !== undefined ? (
                           <Badge variant="outline">{formatCount(event.completion_tokens)} completion</Badge>
                         ) : null}
+                        {event.total_tokens !== undefined ? (
+                          <Badge variant="outline">{formatCount(event.total_tokens)} total</Badge>
+                        ) : null}
+                        {event.approx_tokens !== undefined ? (
+                          <Badge variant="outline">~{formatCount(event.approx_tokens)} est</Badge>
+                        ) : null}
+                        {event.evidence ? <Badge variant="outline">{event.evidence}</Badge> : null}
+                        {event.approximate ? <Badge variant="secondary">approx</Badge> : null}
                       </div>
                       <div className="mt-3 grid gap-3 lg:grid-cols-[120px_minmax(0,1fr)]">
-                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Event {index + 1}</div>
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Event {event.sequence ?? index + 1}</div>
                         <div className="space-y-2 text-sm text-muted-foreground">
                           <p>{event.preview ?? "No preview available."}</p>
                           {event.args ? (
