@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { BotIcon } from "lucide-react";
 import { useCallback } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -76,12 +77,16 @@ export default function ChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
               isNewThread
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
+            <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
+              <BotIcon className="text-primary h-3.5 w-3.5" />
+              <span className="text-xs font-medium">VESPER</span>
+            </div>
             <div className="flex w-full items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>

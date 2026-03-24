@@ -103,6 +103,13 @@ def _latest_human_message(messages: list[Any]) -> str:
     return ""
 
 
+def _slice_latest_run_messages(messages: list[Any]) -> list[Any]:
+    for index in range(len(messages) - 1, -1, -1):
+        if _message_role(messages[index]) == "human":
+            return messages[index:]
+    return messages
+
+
 def _tool_call_events(index: int, msg: Any) -> list[dict[str, Any]]:
     events = []
     for call in getattr(msg, "tool_calls", None) or []:
@@ -234,12 +241,13 @@ def _build_retain_events(thread_id: str, limit: int = 10) -> list[dict[str, Any]
 async def get_thread_introspection(thread_id: str) -> dict[str, Any]:
     checkpoint, metadata = _fetch_latest_checkpoint(thread_id)
     messages = _fetch_latest_messages(thread_id)
+    run_messages = _slice_latest_run_messages(messages)
     channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
 
     snapshot = channel_values.get("vesper_context_snapshot")
     snapshot_mode = "checkpoint"
     if not isinstance(snapshot, dict):
-        latest_human = _latest_human_message(messages)
+        latest_human = _latest_human_message(run_messages)
         if latest_human:
             snapshot = assemble_context_details(latest_human)
             snapshot_mode = "derived_current_runtime"
@@ -254,7 +262,7 @@ async def get_thread_introspection(thread_id: str) -> dict[str, Any]:
             snapshot_mode = "checkpoint_without_snapshot"
 
     compiled_context = channel_values.get("vesper_compiled_context") or snapshot.get("full_compiled_context", "")
-    timeline = _build_timeline(messages)
+    timeline = _build_timeline(run_messages)
     model_name = metadata.get("model_name") if isinstance(metadata, dict) else None
     agent_name = metadata.get("agent_name") if isinstance(metadata, dict) else "vesper"
 
@@ -291,5 +299,7 @@ async def get_thread_introspection(thread_id: str) -> dict[str, Any]:
             "retain_events": _build_retain_events(thread_id),
         },
         "timeline": timeline,
+        "timeline_scope": "latest_user_turn",
+        "selected_run_message_count": len(run_messages),
         "source_of_truth": SOURCE_OF_TRUTH,
     }
