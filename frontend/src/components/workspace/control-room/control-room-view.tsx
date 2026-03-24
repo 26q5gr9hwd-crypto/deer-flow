@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -39,21 +40,36 @@ type TimelineEvent = {
   args?: Record<string, unknown>;
 };
 
+type RunHistoryItem = {
+  run_id: string;
+  thread_id: string;
+  started_at?: string;
+  finished_at?: string;
+  latest_checkpoint_id?: string;
+  checkpoint_count?: number;
+  latest_step?: number;
+  snapshot_fidelity?: string;
+};
+
 type RuntimeIntrospection = {
   thread_id: string;
   run_id?: string;
   agent_name?: string;
   model_name?: string;
   snapshot_mode?: string;
+  snapshot_fidelity?: string;
+  warnings?: string[];
   compiled_context_signature?: string;
   compiled_context_reused?: boolean | null;
+  selected_run?: RunHistoryItem;
+  run_history?: RunHistoryItem[];
+  provenance?: Record<string, unknown>;
   context_snapshot?: {
     full_compiled_context?: string;
     section_order?: string[];
     sections?: ContextSection[];
     approx_total_tokens?: number;
     approx_total_chars?: number;
-    skills_loaded?: boolean;
     source_of_truth?: string[];
   };
   lead?: {
@@ -93,13 +109,13 @@ type RuntimeIntrospection = {
   };
   timeline?: TimelineEvent[];
   source_of_truth?: string[];
+  selected_run_message_count?: number;
 };
 
 function formatCount(value?: number | null) {
   if (value === null || value === undefined) {
     return "—";
   }
-
   return new Intl.NumberFormat().format(value);
 }
 
@@ -107,19 +123,37 @@ function formatBoolean(value?: boolean | null) {
   if (value === null || value === undefined) {
     return "Unknown";
   }
-
   return value ? "Yes" : "No";
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) {
+    return "Unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 function badgeVariantForEvent(type: string) {
   if (type.includes("completed") || type.includes("loaded")) {
     return "default" as const;
   }
-
   if (type.includes("started") || type.includes("requested")) {
     return "secondary" as const;
   }
+  return "outline" as const;
+}
 
+function fidelityVariant(fidelity?: string) {
+  if (fidelity === "exact") {
+    return "default" as const;
+  }
+  if (fidelity === "partial") {
+    return "secondary" as const;
+  }
   return "outline" as const;
 }
 
@@ -127,19 +161,15 @@ function classifySourcePath(path: string) {
   if (path.includes("vesper_context") || path.includes("vesper_soul")) {
     return "Context assembly";
   }
-
   if (path.includes("hindsight") || path.includes("memory") || path.includes("/tmp/")) {
     return "Memory and evidence";
   }
-
   if (path.includes("subagents") || path.includes("tools")) {
     return "Tooling and delegation";
   }
-
-  if (path.includes("config") || path.endsWith("config.yaml") || path.includes("SOURCE_OF_TRUTH")) {
+  if (path.includes("config") || path.endsWith("config.yaml")) {
     return "Configuration";
   }
-
   return "Other runtime files";
 }
 
@@ -166,6 +196,10 @@ function MetricCard({
 }
 
 export function ControlRoomView({ threadId }: { threadId: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const selectedRunId = searchParams.get("run_id") || "";
+
   const [data, setData] = useState<RuntimeIntrospection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -174,8 +208,10 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
     setLoading(true);
     setError(null);
 
+    const qs = selectedRunId ? `?run_id=${encodeURIComponent(selectedRunId)}` : "";
+
     try {
-      const response = await fetch(`/api/runtime/threads/${threadId}/introspection`, {
+      const response = await fetch(`/api/runtime/threads/${threadId}/introspection${qs}`, {
         cache: "no-store",
       });
 
@@ -191,7 +227,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [threadId]);
+  }, [selectedRunId, threadId]);
 
   useEffect(() => {
     void loadData();
@@ -205,6 +241,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
   const recallEvent = data?.memory?.recall_event;
   const retainEvents = data?.memory?.retain_events ?? [];
   const timeline = data?.timeline ?? [];
+  const runHistory = data?.run_history ?? [];
 
   const loadedSkillNames = useMemo(() => {
     return Array.from(
@@ -234,24 +271,41 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
 
   const sourceGroups = useMemo(() => {
     const grouped = new Map<string, string[]>();
-
     for (const path of sourcePaths) {
       const group = classifySourcePath(path);
       grouped.set(group, [...(grouped.get(group) ?? []), path]);
     }
-
     return Array.from(grouped.entries());
   }, [sourcePaths]);
+
+  const handleRunChange = useCallback(
+    (nextRunId: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextRunId) {
+        params.set("run_id", nextRunId);
+      } else {
+        params.delete("run_id");
+      }
+      const nextQuery = params.toString();
+      router.replace(
+        nextQuery
+          ? `/workspace/chats/${threadId}/control-room?${nextQuery}`
+          : `/workspace/chats/${threadId}/control-room`,
+        { scroll: false },
+      );
+    },
+    [router, searchParams, threadId],
+  );
 
   if (loading) {
     return (
       <div className="flex h-full min-h-0 flex-col px-6 py-6">
-        <div className="mx-auto flex w-full max-w-7xl flex-1 items-center justify-center">
+        <div className="mx-auto flex w-full max-w-5xl flex-1 items-center justify-center">
           <Card className="w-full max-w-2xl">
             <CardHeader>
-              <CardTitle>Loading Control Room v1</CardTitle>
+              <CardTitle>Loading Control Room</CardTitle>
               <CardDescription>
-                Pulling the latest runtime snapshot for thread {threadId}.
+                Pulling the selected run snapshot for thread {threadId}.
               </CardDescription>
             </CardHeader>
           </Card>
@@ -268,7 +322,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
             <CardHeader>
               <CardTitle>Control Room could not load</CardTitle>
               <CardDescription>
-                The introspection surface did not return a usable payload for this thread.
+                The runtime introspection surface did not return a usable payload for this thread.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4 text-sm text-muted-foreground">
@@ -300,17 +354,21 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline">Control Room v1</Badge>
+              <Badge variant="outline">Control Room</Badge>
               <Badge variant="secondary">Thread {data.thread_id}</Badge>
               {data.run_id ? <Badge variant="outline">Run {data.run_id}</Badge> : null}
+              {data.snapshot_fidelity ? (
+                <Badge variant={fidelityVariant(data.snapshot_fidelity)}>
+                  {data.snapshot_fidelity} snapshot fidelity
+                </Badge>
+              ) : null}
               {data.snapshot_mode ? <Badge variant="outline">{data.snapshot_mode}</Badge> : null}
             </div>
             <div>
-              <h1 className="text-3xl font-semibold tracking-tight">VESPER runtime inspector</h1>
+              <h1 className="text-3xl font-semibold tracking-tight">VESPER run inspector</h1>
               <p className="mt-2 max-w-4xl text-sm leading-6 text-muted-foreground">
-                A thin control room on top of the OBS-2 introspection surface. It shows what this run saw,
-                what tools and subagents were active, how memory showed up, what happened in sequence,
-                and which runtime files currently define the behavior.
+                Inspect the selected run instead of only the latest reconstructed runtime. Older runs can be
+                selected directly, and Control Room now distinguishes exact, partial, and legacy fidelity.
               </p>
             </div>
           </div>
@@ -328,7 +386,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
             </Button>
             <Button asChild>
               <a
-                href={`/api/runtime/threads/${threadId}/introspection`}
+                href={`/api/runtime/threads/${threadId}/introspection${selectedRunId ? `?run_id=${encodeURIComponent(selectedRunId)}` : ""}`}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -340,26 +398,91 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard
-            label="Compiled context"
-            value={`${formatCount(contextSnapshot?.approx_total_tokens)} tokens`}
-            helper={`${formatCount(contextSnapshot?.sections?.length)} sections from the current runtime snapshot.`}
+            label="Runs detected"
+            value={formatCount(runHistory.length)}
+            helper="Current thread run history grouped from persisted checkpoints."
           />
           <MetricCard
-            label="Lead tools"
-            value={formatCount(lead?.effective_tools?.length)}
-            helper={`${formatCount(subagents.length)} subagents mapped from the live registry.`}
+            label="Compiled context"
+            value={`${formatCount(contextSnapshot?.approx_total_tokens)} tokens`}
+            helper={`${formatCount(sections.length)} sections in the selected run snapshot.`}
           />
           <MetricCard
             label="Memory recall"
             value={formatCount(recallEvent?.result_count)}
-            helper={`${formatCount(recallEvent?.approx_tokens_injected)} tokens injected into the prompt.`}
+            helper={`${formatCount(recallEvent?.approx_tokens_injected)} tokens injected for the selected run.`}
           />
           <MetricCard
             label="Timeline events"
             value={formatCount(timeline.length)}
-            helper={`${formatCount(loadEvents.length)} skill load events and ${formatCount(sourcePaths.length)} source paths.`}
+            helper={`${formatCount(data.selected_run_message_count)} messages inside the selected run slice.`}
           />
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Run history</CardTitle>
+            <CardDescription>
+              Choose which run to inspect. Exact snapshots stay frozen. Partial and legacy runs are labeled explicitly.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground" htmlFor="run-selector">
+                Selected run
+              </label>
+              <select
+                id="run-selector"
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                value={data.selected_run?.run_id ?? selectedRunId}
+                onChange={(event) => handleRunChange(event.target.value)}
+              >
+                {runHistory.map((item) => (
+                  <option key={item.run_id} value={item.run_id}>
+                    {formatTimestamp(item.finished_at)} · {item.snapshot_fidelity ?? "legacy"} · {item.run_id}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Started</div>
+                <div className="mt-1">{formatTimestamp(data.selected_run?.started_at)}</div>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Finished</div>
+                <div className="mt-1">{formatTimestamp(data.selected_run?.finished_at)}</div>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Checkpoints</div>
+                <div className="mt-1">{formatCount(data.selected_run?.checkpoint_count)}</div>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Snapshot fidelity</div>
+                <div className="mt-1">{data.selected_run?.snapshot_fidelity ?? data.snapshot_fidelity ?? "legacy"}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {data.warnings && data.warnings.length > 0 ? (
+          <Card className="border-dashed bg-muted/20">
+            <CardHeader>
+              <CardTitle>Fidelity warnings</CardTitle>
+              <CardDescription>
+                Control Room is explicit about what is frozen versus what is still reconstructed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm text-muted-foreground">
+              {data.warnings.map((warning, index) => (
+                <p key={index} className="rounded-lg border bg-background p-3">
+                  {warning}
+                </p>
+              ))}
+            </CardContent>
+          </Card>
+        ) : null}
 
         <Card className="border-dashed bg-muted/20">
           <CardContent className="flex flex-wrap items-center gap-3 px-5 py-4 text-sm text-muted-foreground">
@@ -396,23 +519,18 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Context snapshot</CardTitle>
                   <CardDescription>
-                    Section-by-section view of what VESPER saw for this run.
+                    Frozen context for the selected run when available, with an explicit fallback label otherwise.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-4 xl:grid-cols-2">
                   {sections.map((section) => (
                     <Card key={section.section_key} className="gap-4 bg-muted/20">
-                      <CardHeader className="space-y-2">
+                      <CardHeader>
                         <div className="flex flex-wrap items-center gap-2">
-                          <CardTitle className="text-lg capitalize">
-                            {section.section_key.replace(/_/g, " ")}
-                          </CardTitle>
-                          <Badge variant={section.included ? "default" : "outline"}>
-                            {section.included ? "Included" : "Skipped"}
-                          </Badge>
+                          <CardTitle className="text-lg capitalize">{section.section_key}</CardTitle>
                           <Badge variant="outline">{formatCount(section.approx_tokens)} tokens</Badge>
                         </div>
-                        <CardDescription>{section.source ?? "Unknown source"}</CardDescription>
+                        <CardDescription>{section.source ?? "No source surfaced."}</CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-3 text-sm text-muted-foreground">
                         <p>{section.preview ?? "No preview available."}</p>
@@ -434,7 +552,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Full compiled context</CardTitle>
                   <CardDescription>
-                    The exact compiled string currently exposed by the OBS-2 surface.
+                    The exact compiled string surfaced for the selected run snapshot.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -450,7 +568,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Lead agent capability map</CardTitle>
                   <CardDescription>
-                    Effective tool surface after runtime filtering, not just theoretical availability.
+                    Tooling and delegation state for the selected run snapshot. Legacy runs may show current runtime reconstruction.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -482,9 +600,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                         <CardTitle className="text-lg">{subagent.name}</CardTitle>
                         <Badge variant="outline">{formatCount(subagent.effective_tools?.length)} tools</Badge>
                       </div>
-                      <CardDescription>
-                        {subagent.description ?? "No description available."}
-                      </CardDescription>
+                      <CardDescription>{subagent.description ?? "No description available."}</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4 text-sm text-muted-foreground">
                       <div className="flex flex-wrap gap-2">
@@ -496,9 +612,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                       </div>
                       <div className="grid gap-3 md:grid-cols-2">
                         <div>
-                          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-foreground">
-                            Allowlist
-                          </div>
+                          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-foreground">Allowlist</div>
                           <div className="flex flex-wrap gap-2">
                             {(subagent.allowlist ?? []).length > 0 ? (
                               (subagent.allowlist ?? []).map((toolName) => (
@@ -512,9 +626,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                           </div>
                         </div>
                         <div>
-                          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-foreground">
-                            Denylist
-                          </div>
+                          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-foreground">Denylist</div>
                           <div className="flex flex-wrap gap-2">
                             {(subagent.denylist ?? []).length > 0 ? (
                               (subagent.denylist ?? []).map((toolName) => (
@@ -535,6 +647,22 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                   </Card>
                 ))}
               </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Available skills snapshot</CardTitle>
+                  <CardDescription>
+                    Inventory visible to the selected run snapshot.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  {(data.skills?.available_skills ?? []).map((skill) => (
+                    <Badge key={skill.name} variant={skill.enabled ? "secondary" : "outline"}>
+                      {skill.name}
+                    </Badge>
+                  ))}
+                </CardContent>
+              </Card>
             </TabsContent>
 
             <TabsContent value="memory" className="space-y-4">
@@ -542,7 +670,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Recall visibility</CardTitle>
                   <CardDescription>
-                    What the Hindsight bridge surfaced for this run and how much prompt space it consumed.
+                    Recall and retain surfaces bound to the selected run rather than a generic thread-level view.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-4 xl:grid-cols-2">
@@ -551,13 +679,9 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                       <div className="flex flex-wrap items-center gap-2">
                         <CardTitle className="text-lg">Recall event</CardTitle>
                         <Badge variant="outline">{formatCount(recallEvent?.result_count)} results</Badge>
-                        <Badge variant="outline">
-                          {formatCount(recallEvent?.approx_tokens_injected)} prompt tokens
-                        </Badge>
+                        <Badge variant="outline">{formatCount(recallEvent?.approx_tokens_injected)} prompt tokens</Badge>
                       </div>
-                      <CardDescription>
-                        Query: {recallEvent?.query ?? "No query surfaced."}
-                      </CardDescription>
+                      <CardDescription>Query: {recallEvent?.query ?? "No query surfaced."}</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-3 text-sm text-muted-foreground">
                       <p>{recallEvent?.preview ?? "No recall preview returned."}</p>
@@ -566,9 +690,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                       </p>
                       {recallEvent?.trace_preview ? (
                         <details className="rounded-lg border bg-background p-3">
-                          <summary className="cursor-pointer text-sm font-medium text-foreground">
-                            Show trace preview
-                          </summary>
+                          <summary className="cursor-pointer text-sm font-medium text-foreground">Show trace preview</summary>
                           <pre className="mt-3 whitespace-pre-wrap break-words text-xs leading-6 text-muted-foreground">
                             {recallEvent.trace_preview}
                           </pre>
@@ -581,7 +703,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                     <CardHeader>
                       <CardTitle className="text-lg">Skill load evidence</CardTitle>
                       <CardDescription>
-                        Proof that runtime knowledge was loaded on demand instead of pre-bloating the prompt.
+                        Loaded skill bodies for the selected run, when they were requested.
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4 text-sm text-muted-foreground">
@@ -616,13 +738,13 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Retain-event proof</CardTitle>
                   <CardDescription>
-                    Current retain evidence exposed by the runtime. Empty here means the run did not surface retain proof yet.
+                    Empty here is explicit. It means the selected run did not surface retain proof through the current evidence path.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm text-muted-foreground">
                   {retainEvents.length === 0 ? (
                     <p className="rounded-lg border bg-muted/20 p-4">
-                      No retain events were surfaced for this run. This is an explicit runtime gap, not hidden behavior.
+                      No retain events were surfaced for this selected run. This is shown as an evidence gap, not hidden behavior.
                     </p>
                   ) : (
                     retainEvents.map((event, index) => (
@@ -643,7 +765,7 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Chronological runtime trace</CardTitle>
                   <CardDescription>
-                    A practical sequence view for user turn, model calls, skill loads, and tool activity.
+                    Timeline built from the selected run checkpoint rather than only the latest turn on the thread.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -661,16 +783,12 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                         ) : null}
                       </div>
                       <div className="mt-3 grid gap-3 lg:grid-cols-[120px_minmax(0,1fr)]">
-                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                          Event {index + 1}
-                        </div>
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Event {index + 1}</div>
                         <div className="space-y-2 text-sm text-muted-foreground">
                           <p>{event.preview ?? "No preview available."}</p>
                           {event.args ? (
                             <details className="rounded-lg border bg-background p-3">
-                              <summary className="cursor-pointer text-sm font-medium text-foreground">
-                                Show event payload
-                              </summary>
+                              <summary className="cursor-pointer text-sm font-medium text-foreground">Show event payload</summary>
                               <pre className="mt-3 whitespace-pre-wrap break-words text-xs leading-6 text-muted-foreground">
                                 {JSON.stringify(event.args, null, 2)}
                               </pre>
@@ -689,55 +807,35 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 <CardHeader>
                   <CardTitle>Runtime source-of-truth map</CardTitle>
                   <CardDescription>
-                    Practical file map for the code paths this control room currently trusts.
+                    Files and provenance paths associated with the selected run snapshot.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {sourceGroups.map(([groupName, paths]) => (
-                    <Card key={groupName} className="gap-4 bg-muted/20">
+                  {sourceGroups.map(([group, paths]) => (
+                    <Card key={group} className="gap-4 bg-muted/20">
                       <CardHeader>
-                        <CardTitle className="text-lg">{groupName}</CardTitle>
-                        <CardDescription>
-                          {paths.length} file{paths.length === 1 ? "" : "s"} contributing to this view.
-                        </CardDescription>
+                        <CardTitle className="text-lg">{group}</CardTitle>
                       </CardHeader>
-                      <CardContent className="space-y-3 text-sm text-muted-foreground">
+                      <CardContent className="space-y-2 text-sm text-muted-foreground">
                         {paths.map((path) => (
-                          <div
-                            key={path}
-                            className="rounded-lg border bg-background px-3 py-2 font-mono text-xs leading-6 text-foreground"
-                          >
+                          <p key={path} className="rounded-lg border bg-background px-3 py-2 font-mono text-xs leading-6">
                             {path}
-                          </div>
+                          </p>
                         ))}
                       </CardContent>
                     </Card>
                   ))}
-                </CardContent>
-              </Card>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle>Available skills inventory</CardTitle>
-                  <CardDescription>
-                    High-level view of the skill catalog exposed by the current runtime.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-3 xl:grid-cols-2">
-                  {(data.skills?.available_skills ?? []).map((skill) => (
-                    <div key={skill.name} className="rounded-xl border bg-muted/20 p-4">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="font-medium text-foreground">{skill.name}</div>
-                        <Badge variant={skill.enabled ? "default" : "outline"}>
-                          {skill.enabled ? "Enabled" : "Disabled"}
-                        </Badge>
-                        {skill.category ? <Badge variant="outline">{skill.category}</Badge> : null}
-                      </div>
-                      <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                        {skill.description ?? "No description available."}
-                      </p>
-                    </div>
-                  ))}
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Selected run provenance</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <pre className="overflow-auto rounded-lg border bg-background p-4 text-xs leading-6">
+                        {JSON.stringify(data.provenance ?? {}, null, 2)}
+                      </pre>
+                    </CardContent>
+                  </Card>
                 </CardContent>
               </Card>
             </TabsContent>

@@ -10,11 +10,14 @@ function getBackendBaseUrl() {
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ thread_id: string }> },
 ) {
   const { thread_id } = await params;
-  const upstream = `${getBackendBaseUrl()}/api/runtime/threads/${thread_id}/introspection`;
+  const requestUrl = new URL(request.url);
+  const upstreamUrl = new URL(`${getBackendBaseUrl()}/api/runtime/threads/${thread_id}/introspection`);
+  upstreamUrl.search = requestUrl.search;
+  const upstream = upstreamUrl.toString();
 
   try {
     const response = await fetch(upstream, {

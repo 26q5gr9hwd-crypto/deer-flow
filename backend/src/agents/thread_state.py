@@ -54,3 +54,4 @@ class ThreadState(AgentState):
     vesper_context_signature: NotRequired[str | None]
     vesper_compiled_context: NotRequired[str | None]
     vesper_context_snapshot: NotRequired[dict[str, Any] | None]
+    vesper_run_snapshot: NotRequired[dict[str, Any] | None]

@@ -22,6 +22,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage
 
+from src.runtime_snapshot import build_runtime_snapshot
 from vesper_context import assemble_context_details
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,25 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             visible_message_count=len(non_system),
         )
 
+        config = getattr(runtime, "config", {}) or {}
+        configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+        metadata = config.get("metadata", {}) if isinstance(config, dict) else {}
+        agent_name = configurable.get("agent_name") or metadata.get("agent_name") or "vesper"
+        model_name = configurable.get("model_name") or metadata.get("model_name")
+        thread_id = runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
+
+        run_snapshot = build_runtime_snapshot(
+            agent_name=agent_name,
+            model_name=model_name,
+            context_snapshot=snapshot,
+            context_signature=signature,
+            context_reused=not rebuilt,
+            thread_id=thread_id,
+            visible_message_count=len(non_system),
+            context_window_size=window_size,
+            snapshot_source="before_model",
+        )
+
         sys_msg = SystemMessage(content=context, id=_SYSTEM_MSG_ID)
 
         ctx_tokens = len(context) // 4
@@ -136,5 +156,6 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             "vesper_context_signature": signature,
             "vesper_compiled_context": context,
             "vesper_context_snapshot": snapshot,
+            "vesper_run_snapshot": run_snapshot,
         }
         return update
