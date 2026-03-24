@@ -416,10 +416,10 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
               {data.snapshot_mode ? <Badge variant="outline">{data.snapshot_mode}</Badge> : null}
             </div>
             <div>
-              <h1 className="text-3xl font-semibold tracking-tight">VESPER run inspector</h1>
+              <h1 className="text-3xl font-semibold tracking-tight">VESPER Control Room</h1>
               <p className="mt-2 max-w-4xl text-sm leading-6 text-muted-foreground">
-                Inspect the selected run instead of only the latest reconstructed runtime. Older runs can be
-                selected directly, and Control Room now distinguishes exact, partial, and legacy fidelity.
+                Navigate the selected run as distinct surfaces instead of one long inspector. Run Inspector,
+                Context, Memory, Tools, Timeline, and Source Map stay separated while fidelity warnings remain explicit.
               </p>
             </div>
           </div>
@@ -447,211 +447,216 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard
-            label="Runs detected"
-            value={formatCount(runHistory.length)}
-            helper="Current thread run history grouped from persisted checkpoints."
-          />
-          <MetricCard
-            label="Compiled context"
-            value={`${formatCount(contextSnapshot?.approx_total_tokens)} tokens`}
-            helper={`${formatCount(sections.length)} sections in the selected run snapshot.`}
-          />
-          <MetricCard
-            label="Memory recall"
-            value={formatCount(recallEvent?.result_count)}
-            helper={`${formatCount(recallEvent?.approx_tokens_injected)} tokens injected for the selected run.`}
-          />
-          <MetricCard
-            label="Timeline events"
-            value={formatCount(timeline.length)}
-            helper={`${formatCount(data.selected_run_message_count)} messages inside the selected run slice.`}
-          />
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Run history</CardTitle>
-            <CardDescription>
-              Choose which run to inspect. Exact snapshots stay frozen. Partial and legacy runs are labeled explicitly.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground" htmlFor="run-selector">
-                Selected run
-              </label>
-              <select
-                id="run-selector"
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                value={data.selected_run?.run_id ?? selectedRunId}
-                onChange={(event) => handleRunChange(event.target.value)}
-              >
-                {runHistory.map((item) => (
-                  <option key={item.run_id} value={item.run_id}>
-                    {formatTimestamp(item.finished_at)} · {item.snapshot_fidelity ?? "legacy"} · {item.run_id}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Started</div>
-                <div className="mt-1">{formatTimestamp(data.selected_run?.started_at)}</div>
-              </div>
-              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Finished</div>
-                <div className="mt-1">{formatTimestamp(data.selected_run?.finished_at)}</div>
-              </div>
-              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Checkpoints</div>
-                <div className="mt-1">{formatCount(data.selected_run?.checkpoint_count)}</div>
-              </div>
-              <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <div className="text-xs font-medium uppercase tracking-wide text-foreground">Snapshot fidelity</div>
-                <div className="mt-1">{data.selected_run?.snapshot_fidelity ?? data.snapshot_fidelity ?? "legacy"}</div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {data.warnings && data.warnings.length > 0 ? (
-          <Card className="border-dashed bg-muted/20">
-            <CardHeader>
-              <CardTitle>Fidelity warnings</CardTitle>
-              <CardDescription>
-                Control Room is explicit about what is frozen versus what is still reconstructed.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm text-muted-foreground">
-              {data.warnings.map((warning, index) => (
-                <p key={index} className="rounded-lg border bg-background p-3">
-                  {warning}
-                </p>
-              ))}
-            </CardContent>
-          </Card>
-        ) : null}
-
-        {tokenAccounting ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>Token accounting</CardTitle>
-              <CardDescription>
-                Compiled context, conversation history, tool schemas, tool calls, tool results, and provider totals are separated for the selected run.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <MetricCard
-                  label="Visible estimate"
-                  value={`${formatCount(tokenAccounting.visible_estimate_total)} tokens`}
-                  helper="Approximate total of compiled context, conversation history, tool schemas, and tool/result history."
-                />
-                <MetricCard
-                  label="Provider prompt"
-                  value={`${formatCount(tokenAccounting.provider_prompt_tokens?.latest)} tokens`}
-                  helper={`${formatCount(tokenAccounting.provider_prompt_tokens?.llm_call_count)} LLM calls surfaced provider prompt totals.`}
-                />
-                <MetricCard
-                  label="Tool schemas"
-                  value={`${formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens`}
-                  helper={`${formatCount(tokenAccounting.tool_schemas?.tool_count)} live tool schemas currently counted.`}
-                />
-                <MetricCard
-                  label="Tool loop history"
-                  value={`${formatCount((tokenAccounting.tool_call_history?.approx_tokens ?? 0) + (tokenAccounting.tool_result_history?.approx_tokens ?? 0))} tokens`}
-                  helper={`${formatCount(tokenAccounting.tool_call_history?.event_count)} calls and ${formatCount(tokenAccounting.tool_result_history?.event_count)} results.`}
-                />
-              </div>
-
-              <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <p>{tokenAccounting.explanation ?? "No token accounting explanation available."}</p>
-              </div>
-
-              <div className="grid gap-4 xl:grid-cols-2">
-                <Card className="gap-3 bg-muted/20">
-                  <CardHeader>
-                    <CardTitle className="text-lg">Visible sources</CardTitle>
-                    <CardDescription>These numbers explain why compiled context is only one part of the final provider prompt.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3 text-sm text-muted-foreground">
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                      <span>Compiled context</span>
-                      <span>{formatCount(tokenAccounting.compiled_context?.approx_tokens)} tokens</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                      <span>Conversation history</span>
-                      <span>{formatCount(tokenAccounting.conversation_history?.approx_tokens)} tokens</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                      <span>Tool schemas</span>
-                      <span>{formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                      <span>Tool call history</span>
-                      <span>{formatCount(tokenAccounting.tool_call_history?.approx_tokens)} tokens</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
-                      <span>Tool result history</span>
-                      <span>{formatCount(tokenAccounting.tool_result_history?.approx_tokens)} tokens</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 font-medium text-foreground">
-                      <span>Latest provider gap</span>
-                      <span>{formatCount(tokenAccounting.latest_provider_gap)} tokens</span>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="gap-3 bg-muted/20">
-                  <CardHeader>
-                    <CardTitle className="text-lg">Warnings and limits</CardTitle>
-                    <CardDescription>Control Room now states clearly when values are approximate or derived.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3 text-sm text-muted-foreground">
-                    {(tokenAccounting.warnings ?? []).map((warning, index) => (
-                      <p key={index} className="rounded-lg border bg-background p-3">
-                        {warning}
-                      </p>
-                    ))}
-                  </CardContent>
-                </Card>
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-
-        <Card className="border-dashed bg-muted/20">
-          <CardContent className="flex flex-wrap items-center gap-3 px-5 py-4 text-sm text-muted-foreground">
-            <span>
-              <strong className="text-foreground">Agent</strong>: {data.agent_name ?? "Unknown"}
-            </span>
-            <span>
-              <strong className="text-foreground">Model</strong>: {data.model_name ?? "Unknown"}
-            </span>
-            <span>
-              <strong className="text-foreground">Context reused</strong>: {formatBoolean(data.compiled_context_reused)}
-            </span>
-            <span>
-              <strong className="text-foreground">Subagent delegation</strong>: {formatBoolean(lead?.subagent_enabled)}
-            </span>
-            <span>
-              <strong className="text-foreground">Recall trace available</strong>: {formatBoolean(recallEvent?.trace_available)}
-            </span>
-          </CardContent>
-        </Card>
-
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <Tabs defaultValue="context" className="gap-6">
-            <TabsList variant="line" className="flex w-full flex-wrap justify-start">
-              <TabsTrigger value="context">Context inspector</TabsTrigger>
-              <TabsTrigger value="tools">Tools + subagents</TabsTrigger>
-              <TabsTrigger value="memory">Memory + recall</TabsTrigger>
-              <TabsTrigger value="timeline">Run timeline</TabsTrigger>
-              <TabsTrigger value="sources">Source map</TabsTrigger>
+        <Tabs defaultValue="inspector" className="min-h-0 flex-1 gap-4">
+          <div className="sticky top-0 z-10 -mx-1 rounded-xl border bg-background/95 px-1 py-1 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+            <TabsList variant="line" className="flex w-full flex-wrap justify-start gap-1">
+              <TabsTrigger value="inspector">Run Inspector</TabsTrigger>
+              <TabsTrigger value="context">Context</TabsTrigger>
+              <TabsTrigger value="memory">Memory</TabsTrigger>
+              <TabsTrigger value="tools">Tools / Subagents</TabsTrigger>
+              <TabsTrigger value="timeline">Timeline / Trace</TabsTrigger>
+              <TabsTrigger value="sources">Source Map</TabsTrigger>
             </TabsList>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <TabsContent value="inspector" className="mt-0 space-y-6">
+                      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <MetricCard
+                          label="Runs detected"
+                          value={formatCount(runHistory.length)}
+                          helper="Current thread run history grouped from persisted checkpoints."
+                        />
+                        <MetricCard
+                          label="Compiled context"
+                          value={`${formatCount(contextSnapshot?.approx_total_tokens)} tokens`}
+                          helper={`${formatCount(sections.length)} sections in the selected run snapshot.`}
+                        />
+                        <MetricCard
+                          label="Memory recall"
+                          value={formatCount(recallEvent?.result_count)}
+                          helper={`${formatCount(recallEvent?.approx_tokens_injected)} tokens injected for the selected run.`}
+                        />
+                        <MetricCard
+                          label="Timeline events"
+                          value={formatCount(timeline.length)}
+                          helper={`${formatCount(data.selected_run_message_count)} messages inside the selected run slice.`}
+                        />
+                      </div>
+              
+                      <Card>
+                        <CardHeader>
+                          <CardTitle>Run history</CardTitle>
+                          <CardDescription>
+                            Choose which run to inspect. Exact snapshots stay frozen. Partial and legacy runs are labeled explicitly.
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-foreground" htmlFor="run-selector">
+                              Selected run
+                            </label>
+                            <select
+                              id="run-selector"
+                              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                              value={data.selected_run?.run_id ?? selectedRunId}
+                              onChange={(event) => handleRunChange(event.target.value)}
+                            >
+                              {runHistory.map((item) => (
+                                <option key={item.run_id} value={item.run_id}>
+                                  {formatTimestamp(item.finished_at)} · {item.snapshot_fidelity ?? "legacy"} · {item.run_id}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+              
+                          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                              <div className="text-xs font-medium uppercase tracking-wide text-foreground">Started</div>
+                              <div className="mt-1">{formatTimestamp(data.selected_run?.started_at)}</div>
+                            </div>
+                            <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                              <div className="text-xs font-medium uppercase tracking-wide text-foreground">Finished</div>
+                              <div className="mt-1">{formatTimestamp(data.selected_run?.finished_at)}</div>
+                            </div>
+                            <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                              <div className="text-xs font-medium uppercase tracking-wide text-foreground">Checkpoints</div>
+                              <div className="mt-1">{formatCount(data.selected_run?.checkpoint_count)}</div>
+                            </div>
+                            <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                              <div className="text-xs font-medium uppercase tracking-wide text-foreground">Snapshot fidelity</div>
+                              <div className="mt-1">{data.selected_run?.snapshot_fidelity ?? data.snapshot_fidelity ?? "legacy"}</div>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+              
+                      {data.warnings && data.warnings.length > 0 ? (
+                        <Card className="border-dashed bg-muted/20">
+                          <CardHeader>
+                            <CardTitle>Fidelity warnings</CardTitle>
+                            <CardDescription>
+                              Control Room is explicit about what is frozen versus what is still reconstructed.
+                            </CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-3 text-sm text-muted-foreground">
+                            {data.warnings.map((warning, index) => (
+                              <p key={index} className="rounded-lg border bg-background p-3">
+                                {warning}
+                              </p>
+                            ))}
+                          </CardContent>
+                        </Card>
+                      ) : null}
+              
+                      {tokenAccounting ? (
+                        <Card>
+                          <CardHeader>
+                            <CardTitle>Token accounting</CardTitle>
+                            <CardDescription>
+                              Compiled context, conversation history, tool schemas, tool calls, tool results, and provider totals are separated for the selected run.
+                            </CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-4">
+                            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                              <MetricCard
+                                label="Visible estimate"
+                                value={`${formatCount(tokenAccounting.visible_estimate_total)} tokens`}
+                                helper="Approximate total of compiled context, conversation history, tool schemas, and tool/result history."
+                              />
+                              <MetricCard
+                                label="Provider prompt"
+                                value={`${formatCount(tokenAccounting.provider_prompt_tokens?.latest)} tokens`}
+                                helper={`${formatCount(tokenAccounting.provider_prompt_tokens?.llm_call_count)} LLM calls surfaced provider prompt totals.`}
+                              />
+                              <MetricCard
+                                label="Tool schemas"
+                                value={`${formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens`}
+                                helper={`${formatCount(tokenAccounting.tool_schemas?.tool_count)} live tool schemas currently counted.`}
+                              />
+                              <MetricCard
+                                label="Tool loop history"
+                                value={`${formatCount((tokenAccounting.tool_call_history?.approx_tokens ?? 0) + (tokenAccounting.tool_result_history?.approx_tokens ?? 0))} tokens`}
+                                helper={`${formatCount(tokenAccounting.tool_call_history?.event_count)} calls and ${formatCount(tokenAccounting.tool_result_history?.event_count)} results.`}
+                              />
+                            </div>
+              
+                            <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
+                              <p>{tokenAccounting.explanation ?? "No token accounting explanation available."}</p>
+                            </div>
+              
+                            <div className="grid gap-4 xl:grid-cols-2">
+                              <Card className="gap-3 bg-muted/20">
+                                <CardHeader>
+                                  <CardTitle className="text-lg">Visible sources</CardTitle>
+                                  <CardDescription>These numbers explain why compiled context is only one part of the final provider prompt.</CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-3 text-sm text-muted-foreground">
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Compiled context</span>
+                                    <span>{formatCount(tokenAccounting.compiled_context?.approx_tokens)} tokens</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Conversation history</span>
+                                    <span>{formatCount(tokenAccounting.conversation_history?.approx_tokens)} tokens</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Tool schemas</span>
+                                    <span>{formatCount(tokenAccounting.tool_schemas?.approx_tokens)} tokens</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Tool call history</span>
+                                    <span>{formatCount(tokenAccounting.tool_call_history?.approx_tokens)} tokens</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2">
+                                    <span>Tool result history</span>
+                                    <span>{formatCount(tokenAccounting.tool_result_history?.approx_tokens)} tokens</span>
+                                  </div>
+                                  <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 font-medium text-foreground">
+                                    <span>Latest provider gap</span>
+                                    <span>{formatCount(tokenAccounting.latest_provider_gap)} tokens</span>
+                                  </div>
+                                </CardContent>
+                              </Card>
+              
+                              <Card className="gap-3 bg-muted/20">
+                                <CardHeader>
+                                  <CardTitle className="text-lg">Warnings and limits</CardTitle>
+                                  <CardDescription>Control Room now states clearly when values are approximate or derived.</CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-3 text-sm text-muted-foreground">
+                                  {(tokenAccounting.warnings ?? []).map((warning, index) => (
+                                    <p key={index} className="rounded-lg border bg-background p-3">
+                                      {warning}
+                                    </p>
+                                  ))}
+                                </CardContent>
+                              </Card>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ) : null}
+              
+                      <Card className="border-dashed bg-muted/20">
+                        <CardContent className="flex flex-wrap items-center gap-3 px-5 py-4 text-sm text-muted-foreground">
+                          <span>
+                            <strong className="text-foreground">Agent</strong>: {data.agent_name ?? "Unknown"}
+                          </span>
+                          <span>
+                            <strong className="text-foreground">Model</strong>: {data.model_name ?? "Unknown"}
+                          </span>
+                          <span>
+                            <strong className="text-foreground">Context reused</strong>: {formatBoolean(data.compiled_context_reused)}
+                          </span>
+                          <span>
+                            <strong className="text-foreground">Subagent delegation</strong>: {formatBoolean(lead?.subagent_enabled)}
+                          </span>
+                          <span>
+                            <strong className="text-foreground">Recall trace available</strong>: {formatBoolean(recallEvent?.trace_available)}
+                          </span>
+                        </CardContent>
+                      </Card>
+            </TabsContent>
 
             <TabsContent value="context" className="space-y-4">
               <Card>
@@ -986,8 +991,8 @@ export function ControlRoomView({ threadId }: { threadId: string }) {
                 </CardContent>
               </Card>
             </TabsContent>
-          </Tabs>
-        </div>
+          </div>
+        </Tabs>
       </div>
     </div>
   );
