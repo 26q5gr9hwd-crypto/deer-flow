@@ -1,43 +1,84 @@
 "use client";
 
-import { BotIcon, MessagesSquare } from "lucide-react";
+import {
+  BrainCircuit,
+  Home,
+  Radar,
+  Settings2,
+  Sparkles,
+  Waypoints,
+  BotIcon,
+  MessagesSquare,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import {
   SidebarGroup,
+  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { useI18n } from "@/core/i18n/hooks";
+
+const primaryNav = [
+  { href: "/workspace/home", label: "Home", icon: Home },
+  { href: "/workspace/control-room", label: "Control Room", icon: Radar },
+  { href: "/workspace/workflows", label: "Workflows", icon: Waypoints },
+  { href: "/workspace/memory", label: "Memory", icon: BrainCircuit },
+  { href: "/workspace/skills", label: "Skills", icon: Sparkles },
+  { href: "/workspace/settings", label: "Settings", icon: Settings2 },
+] as const;
+
+const adapterNav = [
+  { href: "/workspace/chats", label: "Threads", icon: MessagesSquare },
+  { href: "/workspace/agents", label: "Agents", icon: BotIcon },
+] as const;
 
 export function WorkspaceNavChatList() {
-  const { t } = useI18n();
   const pathname = usePathname();
+
   return (
-    <SidebarGroup className="pt-1">
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
-            <Link className="text-muted-foreground" href="/workspace/chats">
-              <MessagesSquare />
-              <span>{t.sidebar.chats}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/agents")}
-            asChild
-          >
-            <Link className="text-muted-foreground" href="/workspace/agents">
-              <BotIcon />
-              <span>{t.sidebar.agents}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    </SidebarGroup>
+    <>
+      <SidebarGroup className="pt-2">
+        <SidebarGroupLabel>Navigate</SidebarGroupLabel>
+        <SidebarMenu>
+          {primaryNav.map((item) => {
+            const Icon = item.icon;
+            const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`);
+            return (
+              <SidebarMenuItem key={item.href}>
+                <SidebarMenuButton isActive={isActive} asChild tooltip={item.label}>
+                  <Link href={item.href} className="text-sidebar-foreground/78">
+                    <Icon />
+                    <span>{item.label}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            );
+          })}
+        </SidebarMenu>
+      </SidebarGroup>
+
+      <SidebarGroup>
+        <SidebarGroupLabel>Runtime adapters</SidebarGroupLabel>
+        <SidebarMenu>
+          {adapterNav.map((item) => {
+            const Icon = item.icon;
+            const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`);
+            return (
+              <SidebarMenuItem key={item.href}>
+                <SidebarMenuButton isActive={isActive} asChild tooltip={item.label}>
+                  <Link href={item.href} className="text-sidebar-foreground/70">
+                    <Icon />
+                    <span>{item.label}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            );
+          })}
+        </SidebarMenu>
+      </SidebarGroup>
+    </>
   );
 }
