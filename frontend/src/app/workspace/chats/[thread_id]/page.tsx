@@ -30,13 +30,13 @@ export default function ChatPage() {
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
 
-  const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
+  const { threadId, isNewThread, setIsNewThread, isMock, isResolvingThread } = useThreadChat();
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
 
   const [thread, sendMessage] = useThreadStream({
-    threadId: isNewThread ? undefined : threadId,
+    threadId: isNewThread || isResolvingThread || threadId === "new" ? undefined : threadId,
     context: settings.context,
     isMock,
     onStart: () => {
@@ -91,7 +91,7 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex items-center gap-2">
-              {!isNewThread ? (
+              {!isNewThread && !isResolvingThread ? (
                 <Button asChild size="sm" variant="outline">
                   <Link href={`/workspace/chats/${threadId}/control-room`}>
                     Control Room
@@ -104,7 +104,7 @@ export default function ChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex size-full justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !isNewThread && !isResolvingThread && "pt-10")}
                 threadId={threadId}
                 thread={thread}
               />
@@ -134,13 +134,13 @@ export default function ChatPage() {
                   className={cn("bg-background/5 w-full -translate-y-4")}
                   isNewThread={isNewThread}
                   threadId={threadId}
-                  autoFocus={isNewThread}
+                  autoFocus={isNewThread && !isResolvingThread}
                   status={thread.isLoading ? "streaming" : "ready"}
                   context={settings.context}
                   extraHeader={
-                    isNewThread && <Welcome mode={settings.context.mode} />
+                    isNewThread && !isResolvingThread && <Welcome mode={settings.context.mode} />
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || isResolvingThread || threadId === "new"}
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}

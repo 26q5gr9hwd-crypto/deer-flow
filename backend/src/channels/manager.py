@@ -348,6 +348,36 @@ class ChannelManager:
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    async def _get_or_create_ongoing_thread(self, client, msg: InboundMessage) -> tuple[str, bool]:
+        """Return the canonical ongoing thread for this channel/chat, creating it if needed."""
+        candidate_topic_ids = [msg.chat_id]
+        if msg.topic_id and msg.topic_id not in candidate_topic_ids:
+            candidate_topic_ids.append(msg.topic_id)
+
+        for topic_id in candidate_topic_ids:
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=topic_id)
+            if thread_id:
+                return thread_id, False
+
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id)
+        if thread_id:
+            self.store.set_thread_id(
+                msg.channel_name,
+                msg.chat_id,
+                thread_id,
+                topic_id=msg.chat_id,
+                user_id=msg.user_id,
+            )
+            return thread_id, False
+
+        original_topic_id = msg.topic_id
+        try:
+            msg.topic_id = msg.chat_id
+            thread_id = await self._create_thread(client, msg)
+        finally:
+            msg.topic_id = original_topic_id
+        return thread_id, True
+
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
 
@@ -423,18 +453,12 @@ class ChannelManager:
         command = parts[0].lower().lstrip("/")
 
         if command == "new":
-            # Create a new thread on the LangGraph Server
             client = self._get_client()
-            thread = await client.threads.create()
-            new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
-                msg.channel_name,
-                msg.chat_id,
-                new_thread_id,
-                topic_id=msg.topic_id,
-                user_id=msg.user_id,
-            )
-            reply = "New conversation started."
+            thread_id, created = await self._get_or_create_ongoing_thread(client, msg)
+            if created:
+                reply = "Started VESPER's ongoing conversation."
+            else:
+                reply = "VESPER stays in one ongoing conversation right now."
         elif command == "status":
             thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."

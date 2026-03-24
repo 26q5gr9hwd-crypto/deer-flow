@@ -461,11 +461,17 @@ class TelegramChannel(Channel):
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
 
-        reply_to = update.message.reply_to_message
-        if reply_to:
-            topic_id = str(reply_to.message_id)
+        chat_type = getattr(update.effective_chat, "type", None)
+        message_thread_id = getattr(update.message, "message_thread_id", None)
+        if chat_type == "private":
+            # VESPER is intentionally a single ongoing private conversation.
+            # Ignore reply targets so quoted replies do not fragment into new threads.
+            topic_id = chat_id
+        elif message_thread_id is not None:
+            # Preserve explicit forum/topic threading outside private chats.
+            topic_id = str(message_thread_id)
         else:
-            topic_id = chat_id  # FIX: use chat_id so all turns in a conversation share the same thread
+            topic_id = chat_id
 
         inbound = self._make_inbound(
             chat_id=chat_id,
