@@ -37,7 +37,7 @@ export default function WorkspaceLayout({
         onOpenChange={handleOpenChange}
       >
         <WorkspaceSidebar />
-        <SidebarInset className="min-h-0 min-w-0 overflow-hidden">{children}</SidebarInset>
+        <SidebarInset className="min-h-0 min-w-0 overflow-x-hidden">{children}</SidebarInset>
       </SidebarProvider>
       <Toaster position="top-center" />
     </QueryClientProvider>

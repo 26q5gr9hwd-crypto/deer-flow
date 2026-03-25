@@ -36,8 +36,8 @@ export function VesperShell({
   children,
 }: VesperShellProps) {
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(245,242,234,0.96)_0%,rgba(242,238,230,0.94)_42%,rgba(237,232,223,0.98)_100%)] text-foreground dark:bg-[linear-gradient(180deg,rgba(18,21,24,0.98)_0%,rgba(24,29,33,0.96)_42%,rgba(30,36,40,0.98)_100%)]">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(196,175,138,0.2),transparent_32%),radial-gradient(circle_at_85%_15%,rgba(110,137,114,0.18),transparent_28%),linear-gradient(135deg,rgba(255,255,255,0.45),transparent_52%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(214,189,133,0.12),transparent_28%),radial-gradient(circle_at_85%_15%,rgba(86,118,96,0.14),transparent_24%),linear-gradient(135deg,rgba(255,255,255,0.05),transparent_48%)]" />
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(196,175,138,0.14),transparent_32%),radial-gradient(circle_at_85%_15%,rgba(110,137,114,0.12),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.26),transparent_52%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(214,189,133,0.1),transparent_28%),radial-gradient(circle_at_85%_15%,rgba(86,118,96,0.12),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent_48%)]" />
       <div className="relative flex h-full min-h-0 min-w-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="border-b border-border/60 bg-background/72 backdrop-blur-xl">
@@ -87,7 +87,7 @@ export function VesperShell({
             </div>
           </div>
           <div className="flex min-h-0 flex-1">
-            <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
+            <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
               <div className="mx-auto flex min-h-full w-full max-w-7xl flex-col gap-6 px-6 py-6">
                 {children}
               </div>

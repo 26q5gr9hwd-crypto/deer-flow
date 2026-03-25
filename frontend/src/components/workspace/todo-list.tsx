@@ -39,7 +39,7 @@ export function TodoList({
   return (
     <div
       className={cn(
-        "flex h-fit w-full origin-bottom translate-y-4 flex-col overflow-hidden rounded-t-xl border border-b-0 bg-white backdrop-blur-sm transition-all duration-200 ease-out",
+        "flex h-fit w-full origin-bottom translate-y-4 flex-col overflow-hidden rounded-t-xl border border-b-0 border-border/70 bg-background/95 backdrop-blur-sm transition-all duration-200 ease-out dark:bg-background/90",
         hidden ? "pointer-events-none translate-y-8 opacity-0" : "",
         className,
       )}
