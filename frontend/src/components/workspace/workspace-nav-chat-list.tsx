@@ -2,6 +2,7 @@
 
 import {
   BrainCircuit,
+  Network,
   Home,
   Radar,
   Settings2,
@@ -26,6 +27,7 @@ const primaryNav = [
   { href: "/workspace/control-room", label: "Control Room", icon: Radar },
   { href: "/workspace/workflows", label: "Workflows", icon: Waypoints },
   { href: "/workspace/memory", label: "Memory", icon: BrainCircuit },
+  { href: "/workspace/memory-graph", label: "Memory Graph", icon: Network },
   { href: "/workspace/skills", label: "Skills", icon: Sparkles },
   { href: "/workspace/settings", label: "Settings", icon: Settings2 },
 ] as const;
