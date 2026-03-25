@@ -69,8 +69,8 @@ Hindsight replaced Graphiti+FalkorDB as the memory backend. All memory operation
 **Test:**
 
 ## Recent Changes (Auto-Updated)
-_Last indexed: 2026-03-24 14:27 UTC_
+_Last indexed: 2026-03-25 04:08 UTC_
 
-The update refines VESPER’s core message‑handling pipeline: **ChannelManager** now extracts the final AI response text (including clarification and tool‑call cases) and isolates only the latest‑turn artifacts, ensuring the agent receives clean, context‑appropriate output. The **Telegram channel** adds a full Markdown‑to‑HTML conversion layer (with safe HTML escaping, code‑block handling, link formatting and automatic splitting to respect Telegram’s 4096‑char limit), so LLM‑generated messages render correctly for end‑users. Finally, the **gateway router** gains robust logic for locating the canonical ongoing Telegram thread—hon
+The gateway now initializes its configuration and logging inside a dedicated `lifespan` context manager, validates required environment variables at startup, and lazily starts/stops the optional IM channel service, ensuring the API process boots cleanly and isolates MCP tool initialization to the LangGraph server. Additionally, a new `/api/memory` router was added that pulls memories from the Hindsight service, classifies them into five UI clusters, builds graph nodes/edges, and returns a structured `MemoryGraphResponse` for the React‑Flow visualization. Together these updates tighten
 
-Changed files: backend/src/channels/manager.py, backend/src/channels/telegram.py, backend/src/gateway/routers/channels.py
+Changed files: backend/src/gateway/app.py, backend/src/gateway/routers/memory_graph.py

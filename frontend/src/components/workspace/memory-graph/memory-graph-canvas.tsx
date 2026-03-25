@@ -418,13 +418,13 @@ function InnerCanvas() {
   /* Sync nodes/edges when API data changes */
   useEffect(function syncNodes() {
     if (transformed.nodes.length > 0) {
-      onNodesChange(transformed.nodes.map(function m(n) { return { type: "reset" as const, item: n }; }));
+      onNodesChange(transformed.nodes.map(function m(n) { return { type: "replace" as const, id: n.id, item: n }; }));
     }
   }, [transformed.nodes]);
 
   useEffect(function syncEdges() {
     if (transformed.edges.length > 0) {
-      onEdgesChange(transformed.edges.map(function m(e) { return { type: "reset" as const, item: e }; }));
+      onEdgesChange(transformed.edges.map(function m(e) { return { type: "replace" as const, id: e.id, item: e }; }));
     }
   }, [transformed.edges]);
 
@@ -547,7 +547,7 @@ function InnerCanvas() {
           break;
         case "/":
           e.preventDefault();
-          c.setQuickSearchOpen(function t(p) { return !p; });
+          c.setQuickSearchOpen(!c.quickSearchOpen);
           if (c.quickSearchOpen) c.setQuickSearchQuery("");
           break;
         case "f": case "F":
