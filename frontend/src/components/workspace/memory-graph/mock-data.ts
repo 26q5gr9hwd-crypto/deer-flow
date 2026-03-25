@@ -1,15 +1,16 @@
-import type { Node, Edge } from "@xyflow/react";
+import type { Edge, Node } from "@xyflow/react";
+
 import { CLUSTER_HUES, CLUSTER_META, hexToRgba } from "./types";
-import type { ClusterKey, MemoryNodeData, ClusterNodeData } from "./types";
+import type { ClusterKey, MemoryParticleNodeData, ClusterNodeData } from "./types";
 
 interface MockMemory {
   id: string;
   title: string;
   snippet: string;
   cluster: ClusterKey;
-  freshness: MemoryNodeData["freshness"];
+  freshness: MemoryParticleNodeData["freshness"];
   confidence: number | null;
-  importance: MemoryNodeData["importance"];
+  importance: MemoryParticleNodeData["importance"];
 }
 
 const MEMORIES: MockMemory[] = [
@@ -67,24 +68,34 @@ export function generateMockGraphData(): { nodes: Node[]; edges: Edge[] } {
     const size = clusterSize(mems.length);
     const meta = CLUSTER_META[ck];
     const cdata: ClusterNodeData = {
-      cluster: ck, label: meta.label, icon: meta.icon,
-      count: mems.length, expanded: true,
-      health: ck === "archive" ? "yellow" : "green",
+      id: `cluster-${ck}`,
+      cluster: ck,
+      kind: "cluster",
+      title: meta.label,
+      summary: `${mems.length} memory particles in ${meta.label.toLowerCase()}.`,
+      memoryCount: mems.length,
+      freshnessText: mems[0]?.snippet ?? "Mock memory set",
+      attentionLabel: ck === "archive" ? "Cold archive" : "Active pattern",
+      previewTitles: mems.slice(0, 3).map((m) => m.title),
     };
     nodes.push({
       id: "cluster-" + ck, type: "cluster", position: pos,
-      data: cdata as any, style: { width: size.width, height: size.height },
+      data: cdata as unknown as Record<string, never>, style: { width: size.width, height: size.height },
       draggable: true, selectable: false,
     });
     mems.forEach((m, i) => {
-      const mdata: MemoryNodeData = {
-        title: m.title, snippet: m.snippet, cluster: m.cluster,
-        freshness: m.freshness, confidence: m.confidence, importance: m.importance,
+      const mdata: MemoryParticleNodeData = {
+        id: m.id,
+        title: m.title,
+        cluster: m.cluster,
+        freshness: m.freshness,
+        confidence: m.confidence,
+        importance: m.importance,
       };
       nodes.push({
         id: m.id, type: "memory", position: nodePos(i),
         parentId: "cluster-" + ck, extent: "parent" as const,
-        draggable: false, data: mdata as any,
+        draggable: false, data: mdata as unknown as Record<string, never>,
       });
     });
   }

@@ -1,27 +1,69 @@
+export type ClusterKey = "identity" | "daniel" | "world" | "playbook" | "archive";
+export type HealthLevel = "green" | "yellow" | "red" | "gray";
+export type FreshnessLevel = "fresh" | "recent" | "aging" | "stale" | "old";
+export type AttentionLevel = "calm" | "watch" | "active";
+export type SemanticEdgeType = "structural" | "resonance" | "tension";
+export type MemoryClusterKind = "cluster" | "action" | "tension";
+
 export interface MemoryEntry {
   id: string;
   title: string;
   snippet: string;
-  cluster: string;
-  freshness: string;
+  cluster: ClusterKey;
+  freshness: FreshnessLevel;
   confidence: number | null;
-  importance: string;
+  importance: "critical" | "normal" | "fleeting";
   created_at: string | null;
+  topic_id: string;
+  topic_title: string;
+  topic_summary: string;
 }
 
-export interface ClusterInfo {
-  key: string;
+export interface RegionInfo {
+  key: ClusterKey;
   label: string;
   icon: string;
   count: number;
-  health: string;
+  health: HealthLevel;
+  freshness_ratio: number;
+  freshness_text: string;
+  attention_level: AttentionLevel;
+  attention_label: string;
+  topic_count: number;
+  strongest_links: string[];
+}
+
+export interface TopicEntry {
+  id: string;
+  cluster: ClusterKey;
+  title: string;
+  summary: string;
+  memory_ids: string[];
+  freshness_text: string;
+  attention_label: string;
+  preview_titles: string[];
+}
+
+export interface MemoryClusterEntry {
+  id: string;
+  cluster: ClusterKey;
+  topic_id: string;
+  title: string;
+  summary: string;
+  kind: MemoryClusterKind;
+  memory_ids: string[];
+  freshness_text: string;
+  attention_label: string;
+  preview_titles: string[];
 }
 
 export interface EdgeEntry {
   id: string;
   source: string;
   target: string;
-  edge_type: string;
+  edge_type: SemanticEdgeType;
+  label: string;
+  strength: number;
 }
 
 export interface GraphInsight {
@@ -30,7 +72,9 @@ export interface GraphInsight {
 }
 
 export interface MemoryGraphData {
-  clusters: ClusterInfo[];
+  regions: RegionInfo[];
+  topics: TopicEntry[];
+  clusters: MemoryClusterEntry[];
   memories: MemoryEntry[];
   edges: EdgeEntry[];
   insights: GraphInsight[];

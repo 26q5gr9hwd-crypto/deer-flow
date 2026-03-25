@@ -19,6 +19,6 @@ export function useMemoryGraphData() {
 export function useRefreshMemoryGraph() {
   const qc = useQueryClient();
   return useCallback(() => {
-    qc.invalidateQueries({ queryKey: QUERY_KEY });
+    void qc.invalidateQueries({ queryKey: QUERY_KEY });
   }, [qc]);
 }

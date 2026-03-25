@@ -1,4 +1,5 @@
 import { getBackendBaseURL } from "../config";
+
 import type { MemoryGraphData } from "./types";
 
 export async function fetchMemoryGraph(): Promise<MemoryGraphData> {

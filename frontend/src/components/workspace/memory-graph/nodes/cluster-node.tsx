@@ -1,56 +1,54 @@
 "use client";
 
-import React, { memo } from "react";
 import type { NodeProps } from "@xyflow/react";
-import { CLUSTER_HUES } from "../types";
+import React, { memo } from "react";
+
+import { CLUSTER_HUES, hexToRgba } from "../types";
 import type { ClusterNodeData } from "../types";
 
-const HEALTH_COLORS: Record<string, string> = {
-  green: "#22c55e",
-  yellow: "#eab308",
-  red: "#ef4444",
-  gray: "#6b7280",
-};
-
-const HEALTH_TOOLTIP: Record<string, string> = {
-  green: "Healthy \u2014 memories are current",
-  yellow: "Needs attention \u2014 some memories are outdated",
-  red: "Review needed \u2014 many stale or conflicting memories",
-  gray: "Insufficient data",
-};
-
-function ClusterNodeInner({ data }: NodeProps) {
+function ClusterNodeInner({ data, selected }: NodeProps) {
   const d = data as unknown as ClusterNodeData;
   const hue = CLUSTER_HUES[d.cluster] || "#64748b";
-
-  const boundaryStyle = { background: hue + "0F", border: "1px solid " + hue + "33" };
-  const labelStyle = { color: hue };
-  const badgeStyle = { background: hue + "26", color: hue };
-  const healthStyle = { backgroundColor: HEALTH_COLORS[d.health] };
+  const border = selected || d.selected ? hexToRgba(hue, 0.8) : hexToRgba(hue, 0.3);
+  const background = `linear-gradient(180deg, ${hexToRgba(hue, d.kind === "cluster" ? 0.14 : 0.2)} 0%, rgba(10, 10, 15, 0.97) 62%)`;
+  const clipPath = d.kind === "action"
+    ? "polygon(18% 0%, 100% 0%, 100% 82%, 82% 100%, 0% 100%, 0% 18%)"
+    : d.kind === "tension"
+      ? "polygon(10% 0%, 100% 0%, 100% 64%, 90% 100%, 0% 100%, 0% 36%)"
+      : undefined;
+  const kindLabel = d.kind === "action" ? "◆ Action" : d.kind === "tension" ? "⟂ Tension" : "◎ Cluster";
 
   return (
-    <div className="relative w-full h-full mg-cluster-enter" role="group" aria-label={d.label + " cluster, " + d.count + " memories"}>
-      <div className="absolute inset-0 rounded-2xl transition-all duration-300" style={boundaryStyle} />
-      <div className="absolute -top-8 left-3 flex items-center gap-2">
-        <span className="text-lg" aria-hidden="true">{d.icon}</span>
-        <span className="text-[13px] font-semibold uppercase tracking-[0.2em]" style={labelStyle}>
-          {d.label}
-        </span>
-        <span
-          className="flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-[10px] font-medium"
-          style={badgeStyle}
-          aria-label={d.count + " memories"}
-        >
-          {d.count}
-        </span>
-        <div
-          className="mg-health-dot h-1.5 w-1.5 rounded-full"
-          style={healthStyle}
-          data-tooltip={HEALTH_TOOLTIP[d.health] || ""}
-          aria-label={HEALTH_TOOLTIP[d.health] || "Health unknown"}
-          role="status"
-        />
+    <div
+      className="mg-cluster-node"
+      style={{
+        borderColor: border,
+        background,
+        clipPath,
+        opacity: d.dimmed ? 0.4 : 1,
+        boxShadow: selected || d.selected ? `0 18px 44px ${hexToRgba(hue, 0.22)}` : `0 14px 32px ${hexToRgba(hue, 0.12)}`,
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${d.title} ${d.kind}`}
+    >
+      <div className="mg-cluster-kind" style={{ color: border }}>{kindLabel}</div>
+      <div className="mg-cluster-title-row">
+        <div className="mg-cluster-title">{d.title}</div>
+        <div className="mg-cluster-count">{d.memoryCount}</div>
       </div>
+      <p className="mg-cluster-summary">{d.summary}</p>
+      <div className="mg-cluster-meta">
+        <span>{d.freshnessText}</span>
+        <span>{d.attentionLabel}</span>
+      </div>
+      {d.previewTitles.length > 0 ? (
+        <div className="mg-cluster-preview">
+          {d.previewTitles.slice(0, 3).map((title) => (
+            <span key={title} className="mg-cluster-chip">{title}</span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,2 +1,16 @@
 export { useMemoryGraphData, useRefreshMemoryGraph } from "./hooks";
-export type { MemoryGraphData, MemoryEntry, ClusterInfo, EdgeEntry, GraphInsight } from "./types";
+export type {
+  AttentionLevel,
+  ClusterKey,
+  EdgeEntry,
+  FreshnessLevel,
+  GraphInsight,
+  HealthLevel,
+  MemoryClusterEntry,
+  MemoryClusterKind,
+  MemoryEntry,
+  MemoryGraphData,
+  RegionInfo,
+  SemanticEdgeType,
+  TopicEntry,
+} from "./types";

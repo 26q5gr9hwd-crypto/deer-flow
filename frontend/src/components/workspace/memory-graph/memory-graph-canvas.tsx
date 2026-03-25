@@ -1,659 +1,547 @@
 "use client";
 
-import React, {
-  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
-} from "react";
 import {
-  ReactFlow, ReactFlowProvider, useReactFlow, useNodesState, useEdgesState,
-  MiniMap, Background, BackgroundVariant,
+  Background,
+  BackgroundVariant,
+  MiniMap,
+  ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
 } from "@xyflow/react";
-import type { Node, Edge } from "@xyflow/react";
+import type { Edge, Node, NodeMouseHandler } from "@xyflow/react";
+import { AlertTriangle, Loader2, Maximize2, Minus, Plus, RefreshCw } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
 import "@xyflow/react/dist/style.css";
-import "./memory-graph.css";
-import { Minus, Plus, Maximize2, Search as SearchIcon, X, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { MemoryNode } from "./nodes/memory-node";
-import { ClusterNode } from "./nodes/cluster-node";
-import { AssociationEdge, TemporalEdge, ContradictionEdge } from "./edges/custom-edges";
-import { Inspector } from "./inspector";
-import type { ConnectionInfo } from "./inspector";
-import { CommandPalette } from "./command-palette";
-import { CLUSTER_HUES, CLUSTER_META, hexToRgba } from "./types";
-import type { MemoryNodeData, ClusterNodeData, ClusterKey } from "./types";
+
 import { useMemoryGraphData, useRefreshMemoryGraph } from "@/core/memory-graph";
-import type { MemoryGraphData } from "@/core/memory-graph";
+import type { ClusterKey, MemoryEntry, MemoryGraphData } from "@/core/memory-graph";
 
-/* ── Stable refs outside component ────────── */
-const nodeTypes = { memory: MemoryNode, cluster: ClusterNode };
-const edgeTypes = { association: AssociationEdge, temporal: TemporalEdge, contradiction: ContradictionEdge };
-const CLUSTER_ORDER: ClusterKey[] = ["identity", "daniel", "world", "playbook", "archive"];
+import "./memory-graph.css";
+import { SemanticEdge } from "./edges/custom-edges";
+import { Inspector } from "./inspector";
+import { ClusterNode } from "./nodes/cluster-node";
+import { MemoryNode } from "./nodes/memory-node";
+import { RegionNode } from "./nodes/region-node";
+import { TopicNode } from "./nodes/topic-node";
+import { CLUSTER_HUES, clamp, hexToRgba } from "./types";
+import type { ClusterNodeData, MemoryParticleNodeData, RegionNodeData, SemanticEdgeData, TopicNodeData } from "./types";
 
-/* ── Context ──────────────────────────────── */
-type CtxValue = {
-  selectedNodeId: string | null;
-  setSelectedNodeId: (id: string | null) => void;
-  hoveredNodeId: string | null;
-  setHoveredNodeId: (id: string | null) => void;
-  cmdPaletteOpen: boolean;
-  setCmdPaletteOpen: (o: boolean) => void;
-  quickSearchOpen: boolean;
-  setQuickSearchOpen: (o: boolean) => void;
-  quickSearchQuery: string;
-  setQuickSearchQuery: (q: string) => void;
-  refreshGraph: () => void;
+const nodeTypes = { region: RegionNode, topic: TopicNode, cluster: ClusterNode, memory: MemoryNode };
+const edgeTypes = { semantic: SemanticEdge };
+const DEFAULT_POS = { x: 400, y: 360 };
+
+const REGION_POSITIONS: Record<ClusterKey, { x: number; y: number }> = {
+  identity: { x: 70, y: 90 },
+  daniel: { x: 760, y: 90 },
+  world: { x: 70, y: 430 },
+  playbook: { x: 760, y: 430 },
+  archive: { x: 415, y: 745 },
 };
 
-const CTX_DEF: CtxValue = {
-  selectedNodeId: null, setSelectedNodeId: function noop() {},
-  hoveredNodeId: null, setHoveredNodeId: function noop() {},
-  cmdPaletteOpen: false, setCmdPaletteOpen: function noop() {},
-  quickSearchOpen: false, setQuickSearchOpen: function noop() {},
-  quickSearchQuery: "", setQuickSearchQuery: function noop() {},
-  refreshGraph: function noop() {},
-};
+const TOPIC_OFFSETS = [
+  { x: 400, y: -70 },
+  { x: 430, y: 105 },
+  { x: 320, y: 265 },
+  { x: 110, y: 290 },
+  { x: -70, y: 170 },
+];
 
-const Ctx = createContext<CtxValue>(CTX_DEF);
-export const useMemoryGraph = function useMemoryGraph() { return useContext(Ctx); };
+const CLUSTER_OFFSETS = [
+  { x: 24, y: -178 },
+  { x: 208, y: -30 },
+  { x: 144, y: 162 },
+  { x: -52, y: 118 },
+];
 
-function MemoryGraphProvider(p: { children: React.ReactNode }) {
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
-  const [quickSearchOpen, setQuickSearchOpen] = useState(false);
-  const [quickSearchQuery, setQuickSearchQuery] = useState("");
-  const refreshGraph = useRefreshMemoryGraph();
-
-  const value = useMemo(function memo() {
-    return {
-      selectedNodeId, setSelectedNodeId,
-      hoveredNodeId, setHoveredNodeId,
-      cmdPaletteOpen, setCmdPaletteOpen,
-      quickSearchOpen, setQuickSearchOpen,
-      quickSearchQuery, setQuickSearchQuery,
-      refreshGraph,
-    };
-  }, [selectedNodeId, hoveredNodeId, cmdPaletteOpen, quickSearchOpen, quickSearchQuery, refreshGraph]);
-
-  return (
-    <Ctx.Provider value={value}>
-      <ReactFlowProvider>{p.children}</ReactFlowProvider>
-    </Ctx.Provider>
-  );
+function polarOffsets(count: number, radius: number) {
+  return Array.from({ length: count }, (_, index) => {
+    const angle = (-Math.PI / 2) + (index / Math.max(count, 1)) * Math.PI * 2;
+    return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+  });
 }
 
-/* ── Transform API data to React Flow nodes/edges ── */
-const CLUSTER_POS: Record<ClusterKey, { x: number; y: number }> = {
-  identity: { x: 60, y: 80 },
-  daniel:   { x: 700, y: 80 },
-  world:    { x: 60, y: 380 },
-  playbook: { x: 700, y: 380 },
-  archive:  { x: 380, y: 640 },
-};
+function regionNodeId(cluster: ClusterKey): string { return `region-${cluster}`; }
+function topicNodeId(topicId: string): string { return `topic-${topicId}`; }
+function semanticClusterNodeId(clusterId: string): string { return `semantic-cluster-${clusterId}`; }
+function memoryParticleNodeId(memoryId: string): string { return `memory-particle-${memoryId}`; }
 
-const NW = 180, NH = 56, GX = 16, GY = 14, PAD = 20, HDR = 16, COLS = 3;
-
-function clusterSize(n: number) {
-  const cols = Math.min(n, COLS);
-  const rows = Math.ceil(n / COLS);
-  return { width: cols * (NW + GX) - GX + PAD * 2, height: HDR + rows * (NH + GY) - GY + PAD * 2 };
-}
-
-function nodePos(i: number) {
-  return { x: PAD + (i % COLS) * (NW + GX), y: HDR + PAD + Math.floor(i / COLS) * (NH + GY) };
-}
-
-function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[] } {
+function buildGraph(
+  data: MemoryGraphData,
+  focusedRegion: ClusterKey | null,
+  selectedTopicId: string | null,
+  selectedClusterId: string | null,
+  selectedMemoryId: string | null,
+  hoveredNodeId: string | null,
+): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
+  const topicPositions = new Map<string, { x: number; y: number }>();
+  const clusterPositions = new Map<string, { x: number; y: number }>();
 
-  const grouped = new Map<ClusterKey, MemoryGraphData["memories"]>();
-  for (const m of data.memories) {
-    const ck = m.cluster as ClusterKey;
-    if (!grouped.has(ck)) grouped.set(ck, []);
-    grouped.get(ck)!.push(m);
-  }
-
-  for (const [ck, mems] of grouped) {
-    const pos = CLUSTER_POS[ck] || { x: 380, y: 380 };
-    const size = clusterSize(mems.length);
-    const meta = CLUSTER_META[ck];
-    const clusterInfo = data.clusters.find(function f(c) { return c.key === ck; });
-
-    const cdata: ClusterNodeData = {
-      cluster: ck, label: meta?.label || ck, icon: meta?.icon || "\u{1F4E6}",
-      count: mems.length, expanded: true,
-      health: (clusterInfo?.health as "green" | "yellow" | "red" | "gray") || "green",
-    };
+  data.regions.forEach((region) => {
+    const nodeId = regionNodeId(region.key);
     nodes.push({
-      id: "cluster-" + ck, type: "cluster", position: pos,
-      data: cdata as any, style: { width: size.width, height: size.height },
-      draggable: true, selectable: false,
+      id: nodeId,
+      type: "region",
+      position: REGION_POSITIONS[region.key] ?? DEFAULT_POS,
+      draggable: false,
+      selectable: false,
+      data: {
+        cluster: region.key,
+        label: region.label,
+        icon: region.icon,
+        count: region.count,
+        health: region.health,
+        freshnessRatio: clamp(region.freshness_ratio),
+        freshnessText: region.freshness_text,
+        attentionLabel: region.attention_label,
+        attentionLevel: region.attention_level,
+        topicCount: region.topic_count,
+        strongestLinks: region.strongest_links,
+        focused: region.key === focusedRegion,
+        dimmed: Boolean(focusedRegion && region.key !== focusedRegion && !hoveredNodeId?.startsWith(`region-${region.key}`)),
+      } satisfies RegionNodeData,
     });
+  });
 
-    mems.forEach(function iter(m, i) {
-      const mdata: MemoryNodeData = {
-        title: m.title,
-        snippet: m.snippet,
-        cluster: ck,
-        freshness: m.freshness as MemoryNodeData["freshness"],
-        confidence: m.confidence,
-        importance: m.importance as MemoryNodeData["importance"],
-      };
-      nodes.push({
-        id: m.id, type: "memory", position: nodePos(i),
-        parentId: "cluster-" + ck, extent: "parent" as const,
-        draggable: false, data: mdata as any,
-      });
-    });
-  }
-
-  for (const e of data.edges) {
-    const etype = e.edge_type === "temporal" ? "temporal"
-      : e.edge_type === "contradiction" ? "contradiction"
-      : "association";
-
-    let color = "rgba(148,163,184,0.15)";
-    if (etype === "association") {
-      const srcMem = data.memories.find(function f(m) { return m.id === e.source; });
-      if (srcMem) {
-        const hue = CLUSTER_HUES[srcMem.cluster as ClusterKey];
-        if (hue) color = hexToRgba(hue, 0.15);
-      }
-    }
-
+  data.edges.forEach((edge) => {
+    const sourceId = regionNodeId(edge.source as ClusterKey);
+    const targetId = regionNodeId(edge.target as ClusterKey);
     edges.push({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      type: etype,
-      data: { color },
+      id: edge.id,
+      source: sourceId,
+      target: targetId,
+      type: "semantic",
+      data: {
+        semanticType: edge.edge_type,
+        label: edge.label,
+        strength: edge.strength,
+        muted: Boolean(focusedRegion && edge.source !== focusedRegion && edge.target !== focusedRegion),
+        showLabel: !focusedRegion || edge.source === focusedRegion || edge.target === focusedRegion,
+      } satisfies SemanticEdgeData,
     });
+  });
+
+  if (!focusedRegion) {
+    return { nodes, edges };
   }
+
+  const regionTopics = data.topics.filter((topic) => topic.cluster === focusedRegion).slice(0, 5);
+  const base = REGION_POSITIONS[focusedRegion] ?? DEFAULT_POS;
+  regionTopics.forEach((topic, index) => {
+    const offset = TOPIC_OFFSETS[index] ?? TOPIC_OFFSETS[TOPIC_OFFSETS.length - 1]!;
+    const id = topicNodeId(topic.id);
+    const position = { x: base.x + offset.x, y: base.y + offset.y };
+    topicPositions.set(topic.id, position);
+    nodes.push({
+      id,
+      type: "topic",
+      position,
+      draggable: false,
+      selectable: false,
+      data: {
+        id: topic.id,
+        cluster: topic.cluster,
+        title: topic.title,
+        summary: topic.summary,
+        memoryCount: topic.memory_ids.length,
+        freshnessText: topic.freshness_text,
+        attentionLabel: topic.attention_label,
+        previewTitles: topic.preview_titles,
+        selected: selectedTopicId === topic.id,
+        dimmed: Boolean(selectedTopicId && selectedTopicId !== topic.id),
+      } satisfies TopicNodeData,
+    });
+    edges.push({
+      id: `topic-link-${topic.id}`,
+      source: regionNodeId(focusedRegion),
+      target: id,
+      type: "semantic",
+      data: { semanticType: "structural", label: "Theme", strength: 0.5, muted: false, showLabel: false } satisfies SemanticEdgeData,
+    });
+  });
+
+  if (!selectedTopicId) {
+    return { nodes, edges };
+  }
+
+  const topicClusters = data.clusters.filter((cluster) => cluster.topic_id === selectedTopicId).slice(0, 4);
+  const topicPosition = topicPositions.get(selectedTopicId) ?? { x: base.x + 280, y: base.y + 120 };
+  topicClusters.forEach((cluster, index) => {
+    const offset = CLUSTER_OFFSETS[index] ?? CLUSTER_OFFSETS[CLUSTER_OFFSETS.length - 1]!;
+    const id = semanticClusterNodeId(cluster.id);
+    const position = { x: topicPosition.x + offset.x, y: topicPosition.y + offset.y };
+    clusterPositions.set(cluster.id, position);
+    nodes.push({
+      id,
+      type: "cluster",
+      position,
+      draggable: false,
+      selectable: false,
+      data: {
+        id: cluster.id,
+        cluster: cluster.cluster,
+        kind: cluster.kind,
+        title: cluster.title,
+        summary: cluster.summary,
+        memoryCount: cluster.memory_ids.length,
+        freshnessText: cluster.freshness_text,
+        attentionLabel: cluster.attention_label,
+        previewTitles: cluster.preview_titles,
+        selected: selectedClusterId === cluster.id,
+        dimmed: Boolean(selectedClusterId && selectedClusterId !== cluster.id),
+      } satisfies ClusterNodeData,
+    });
+    edges.push({
+      id: `cluster-link-${cluster.id}`,
+      source: topicNodeId(selectedTopicId),
+      target: id,
+      type: "semantic",
+      data: {
+        semanticType: cluster.kind === "tension" ? "tension" : cluster.kind === "action" ? "resonance" : "structural",
+        label: cluster.kind === "cluster" ? "Cluster" : cluster.kind === "action" ? "Action" : "Tension",
+        strength: 0.46,
+        muted: false,
+        showLabel: false,
+      } satisfies SemanticEdgeData,
+    });
+  });
+
+  if (!selectedClusterId) {
+    return { nodes, edges };
+  }
+
+  const activeCluster = data.clusters.find((cluster) => cluster.id === selectedClusterId);
+  if (!activeCluster) {
+    return { nodes, edges };
+  }
+  const swarmPosition = clusterPositions.get(selectedClusterId) ?? topicPosition;
+  const memoryEntries = activeCluster.memory_ids
+    .map((id) => data.memories.find((memory) => memory.id === id))
+    .filter((item): item is MemoryEntry => Boolean(item))
+    .slice(0, 12);
+
+  polarOffsets(memoryEntries.length, 120).forEach((offset, index) => {
+    const memory = memoryEntries[index]!;
+    const id = memoryParticleNodeId(memory.id);
+    nodes.push({
+      id,
+      type: "memory",
+      position: { x: swarmPosition.x + offset.x, y: swarmPosition.y + offset.y },
+      draggable: false,
+      selectable: false,
+      data: {
+        id: memory.id,
+        title: memory.title,
+        cluster: memory.cluster,
+        freshness: memory.freshness,
+        importance: memory.importance,
+        confidence: memory.confidence,
+        selected: selectedMemoryId === memory.id,
+      } satisfies MemoryParticleNodeData,
+    });
+    edges.push({
+      id: `memory-link-${memory.id}`,
+      source: semanticClusterNodeId(selectedClusterId),
+      target: id,
+      type: "semantic",
+      data: { semanticType: "structural", label: "Particle", strength: 0.26, muted: false, showLabel: false } satisfies SemanticEdgeData,
+    });
+  });
 
   return { nodes, edges };
 }
 
-/* ── Helpers ───────────────────────────────── */
-function connectedIds(edges: Edge[], nodeId: string): Set<string> {
-  const s = new Set<string>();
-  for (const e of edges) {
-    if (e.source === nodeId) s.add(e.target);
-    if (e.target === nodeId) s.add(e.source);
-  }
-  return s;
-}
+function MemoryGraphInner() {
+  const reactFlow = useReactFlow();
+  const refreshGraph = useRefreshMemoryGraph();
+  const { data, isLoading, error, isFetching } = useMemoryGraphData();
 
-function limitEdges(edges: Edge[], max: number): Edge[] {
-  const cnt = new Map<string, number>();
-  return edges.filter(function f(e) {
-    const sc = cnt.get(e.source) || 0;
-    const tc = cnt.get(e.target) || 0;
-    if (sc >= max || tc >= max) return false;
-    cnt.set(e.source, sc + 1);
-    cnt.set(e.target, tc + 1);
-    return true;
-  });
-}
+  const [focusedRegion, setFocusedRegion] = useState<ClusterKey | null>(null);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const [selectedClusterId, setSelectedClusterId] = useState<string | null>(null);
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
-/* ── ZoomControls ─────────────────────────── */
-function ZoomControls() {
-  const rf = useReactFlow();
-  const [visible, setVisible] = useState(true);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const regions = useMemo(() => data?.regions ?? [], [data]);
+  const topics = useMemo(() => data?.topics ?? [], [data]);
+  const clusters = useMemo(() => data?.clusters ?? [], [data]);
+  const memories = useMemo(() => data?.memories ?? [], [data]);
+  const insights = useMemo(() => data?.insights ?? [], [data]);
 
-  const resetTimer = useCallback(function rt() {
-    setVisible(true);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(function hide() { setVisible(false); }, 3000);
-  }, []);
+  const regionMap = useMemo(() => new Map(regions.map((region) => [region.key, region])), [regions]);
+  const topicMap = useMemo(() => new Map(topics.map((topic) => [topic.id, topic])), [topics]);
+  const clusterMap = useMemo(() => new Map(clusters.map((cluster) => [cluster.id, cluster])), [clusters]);
+  const memoryMap = useMemo(() => new Map(memories.map((memory) => [memory.id, memory])), [memories]);
+  const memoryToSemanticCluster = useMemo(() => {
+    const pairs: Array<[string, string]> = [];
+    clusters.forEach((cluster) => cluster.memory_ids.forEach((memoryId) => pairs.push([memoryId, cluster.id])));
+    return new Map(pairs);
+  }, [clusters]);
 
-  useEffect(function eff() {
-    resetTimer();
-    const a = function act() { resetTimer(); };
-    window.addEventListener("mousemove", a);
-    window.addEventListener("wheel", a);
-    window.addEventListener("touchstart", a);
-    return function cl() {
-      window.removeEventListener("mousemove", a);
-      window.removeEventListener("wheel", a);
-      window.removeEventListener("touchstart", a);
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [resetTimer]);
+  const selectedMemory = selectedMemoryId ? (memoryMap.get(selectedMemoryId) ?? null) : null;
+  const selectedCluster = selectedMemory
+    ? (clusterMap.get(memoryToSemanticCluster.get(selectedMemory.id) ?? "") ?? null)
+    : (selectedClusterId ? (clusterMap.get(selectedClusterId) ?? null) : null);
+  const selectedTopic = selectedCluster
+    ? (topicMap.get(selectedCluster.topic_id) ?? null)
+    : selectedMemory
+      ? (topicMap.get(selectedMemory.topic_id) ?? null)
+      : (selectedTopicId ? (topicMap.get(selectedTopicId) ?? null) : null);
+  const selectedRegionKey = (selectedMemory?.cluster ?? selectedCluster?.cluster ?? selectedTopic?.cluster ?? focusedRegion) ?? null;
+  const selectedRegion = selectedRegionKey ? (regionMap.get(selectedRegionKey) ?? null) : null;
+  const regionTopics = selectedRegionKey ? topics.filter((topic) => topic.cluster === selectedRegionKey).slice(0, 5) : [];
+  const topicClusters = selectedTopic ? clusters.filter((cluster) => cluster.topic_id === selectedTopic.id) : [];
+  const clusterMemories = selectedCluster
+    ? selectedCluster.memory_ids.map((id) => memoryMap.get(id)).filter((item): item is MemoryEntry => Boolean(item))
+    : [];
+  const relatedMemories = selectedMemory ? clusterMemories.filter((item) => item.id !== selectedMemory.id) : [];
 
-  const btn = "mg-focusable flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-black/40 text-white/60 backdrop-blur-xl transition-all duration-200 hover:bg-black/60 hover:text-white active:scale-95";
-  const ziO = { duration: 200 };
-  const zoO = { duration: 200 };
-  const fvO = { padding: 0.15, duration: 300 };
-
-  return (
-    <div
-      className={cn(
-        "absolute bottom-6 right-6 z-50 flex flex-col gap-1 transition-opacity duration-500",
-        visible ? "opacity-100" : "opacity-0 hover:opacity-100",
-      )}
-      onMouseEnter={function me() { setVisible(true); }}
-      role="toolbar"
-      aria-label="Zoom controls"
-    >
-      <button onClick={function zi() { rf.zoomIn(ziO); }} className={btn} aria-label="Zoom in" title="Zoom in">
-        <Plus className="h-4 w-4" />
-      </button>
-      <button onClick={function zo() { rf.zoomOut(zoO); }} className={btn} aria-label="Zoom out" title="Zoom out">
-        <Minus className="h-4 w-4" />
-      </button>
-      <div className="my-0.5 h-px w-full bg-white/[0.06]" />
-      <button onClick={function fv() { rf.fitView(fvO); }} className={btn} aria-label="Fit to view" title="Fit to view (F)">
-        <Maximize2 className="h-4 w-4" />
-      </button>
-    </div>
-  );
-}
-
-/* ── GraphMinimap ─────────────────────────── */
-const mmStyle = { width: 160, height: 100, backgroundColor: "rgba(0,0,0,0.35)", borderRadius: 12 };
-function ncFn(n: Node) { return n.type === "cluster" ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.2)"; }
-
-function GraphMinimap() {
-  return (
-    <MiniMap
-      className="!absolute !bottom-6 !left-6 !hidden !rounded-xl !border !border-white/[0.06] !shadow-2xl md:!block"
-      style={mmStyle}
-      maskColor="rgba(255,255,255,0.06)"
-      nodeColor={ncFn}
-      pannable
-      zoomable
-      aria-label="Graph minimap"
-    />
-  );
-}
-
-/* ── ShortcutOverlay ──────────────────────── */
-const SHORTCUTS = [
-  { key: "\u2318K", action: "Command palette" },
-  { key: "1 \u2013 5", action: "Jump to cluster" },
-  { key: "F", action: "Fit all to view" },
-  { key: "Esc", action: "Close / deselect" },
-  { key: "/", action: "Quick search" },
-  { key: "Space", action: "Toggle inspector" },
-  { key: "Tab", action: "Cycle clusters" },
-  { key: "?", action: "Show shortcuts" },
-];
-
-function ShortcutOverlay(p: { open: boolean; onClose: () => void }) {
-  if (!p.open) return null;
-  return (
-    <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={p.onClose} role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
-      <div className="w-[360px] rounded-2xl border border-white/[0.08] bg-zinc-900/90 p-6 shadow-2xl backdrop-blur-xl" onClick={function stop(e) { e.stopPropagation(); }}>
-        <h3 className="mb-5 text-[11px] font-medium uppercase tracking-[0.3em] text-white/40">Keyboard shortcuts</h3>
-        <div className="flex flex-col gap-1">
-          {SHORTCUTS.map(function rs(s) {
-            return (
-              <div key={s.key} className="flex items-center justify-between rounded-lg px-3 py-2 text-sm">
-                <span className="text-white/60">{s.action}</span>
-                <kbd className="rounded-md border border-white/[0.1] bg-white/[0.04] px-2.5 py-1 font-mono text-xs text-white/40">{s.key}</kbd>
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-5 text-center text-[11px] text-white/25">Press ? or Esc to close</div>
-      </div>
-    </div>
-  );
-}
-
-/* ── LoadingState ─────────────────────────── */
-function LoadingState() {
-  return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label="Loading memory graph">
-      <div className="flex flex-col items-center gap-4">
-        <div className="flex gap-8">
-          {[0, 1, 2].map(function sk(i) {
-            return (
-              <div key={i} className="mg-skeleton h-32 w-48 rounded-2xl border border-white/[0.04]">
-                <div className="flex flex-col gap-2 p-4">
-                  <div className="mg-skeleton h-3 w-20 rounded" />
-                  <div className="mg-skeleton h-10 w-full rounded-lg" />
-                  <div className="mg-skeleton h-10 w-full rounded-lg" />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div className="flex items-center gap-2 text-[13px] text-white/30">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading memory{"\u2026"}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── ErrorToast ───────────────────────────── */
-function ErrorToast(p: { message: string; onRetry?: () => void }) {
-  return (
-    <div className="absolute bottom-6 left-1/2 z-[90] -translate-x-1/2" role="alert">
-      <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-950/80 px-4 py-2.5 text-[13px] text-red-300 shadow-2xl backdrop-blur-xl">
-        <AlertTriangle className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
-        <span>{p.message}</span>
-        {p.onRetry && (
-          <button
-            onClick={p.onRetry}
-            className="mg-focusable ml-2 flex items-center gap-1 rounded-lg border border-red-500/20 px-2 py-1 text-[11px] text-red-300 transition-colors hover:bg-red-500/10"
-            aria-label="Retry loading"
-          >
-            <RefreshCw className="h-3 w-3" /> Retry
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── EmptyState ───────────────────────────── */
-function EmptyState() {
-  return (
-    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center" role="status">
-      <div className="relative flex flex-col items-center">
-        <div className="absolute -top-24 h-48 w-48 rounded-full bg-indigo-500/[0.05] blur-[80px]" />
-        <div className="absolute -top-16 h-32 w-32 rounded-full bg-violet-500/[0.04] blur-[60px]" />
-        <div className="relative mb-8 flex h-24 w-24 items-center justify-center rounded-full border border-white/[0.05] bg-white/[0.02]">
-          <span className="text-5xl opacity-80">{"\uD83E\uDDE0"}</span>
-        </div>
-        <p className="text-center text-[15px] leading-relaxed tracking-wide text-white/30">
-          No memories yet.<br /><span className="text-white/20">VESPER learns as you work together.</span>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ── QuickSearchBar ───────────────────────── */
-function QuickSearchBar() {
-  const ctx = useContext(Ctx);
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(function focus() { inputRef.current?.focus(); }, []);
-
-  return (
-    <div className="absolute left-1/2 top-4 z-[70] -translate-x-1/2">
-      <div className="flex w-[400px] max-w-[90vw] items-center gap-2 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-xl">
-        <SearchIcon className="h-4 w-4 flex-shrink-0 text-white/30" aria-hidden="true" />
-        <input
-          ref={inputRef}
-          value={ctx.quickSearchQuery}
-          onChange={function oc(e) { ctx.setQuickSearchQuery(e.target.value); }}
-          onKeyDown={function kd(e) {
-            if (e.key === "Escape") { e.preventDefault(); ctx.setQuickSearchQuery(""); ctx.setQuickSearchOpen(false); }
-          }}
-          placeholder={"Search memories\u2026"}
-          className="flex-1 bg-transparent text-[14px] text-white/80 outline-none placeholder:text-white/25"
-          aria-label="Search memories"
-          role="searchbox"
-        />
-        {ctx.quickSearchQuery && (
-          <button
-            onClick={function cl() { ctx.setQuickSearchQuery(""); ctx.setQuickSearchOpen(false); }}
-            className="mg-focusable flex h-5 w-5 items-center justify-center rounded text-white/30 transition-colors hover:text-white/60"
-            aria-label="Clear search"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── InnerCanvas ──────────────────────────── */
-const proOpts = { hideAttribution: true };
-const defaultViewport = { x: 0, y: 0, zoom: 0.85 };
-const fitViewOpts = { padding: 0.2, duration: 300 };
-
-function InnerCanvas() {
-  const rf = useReactFlow();
-  const ctx = useContext(Ctx);
-  const ctxRef = useRef(ctx);
-  ctxRef.current = ctx;
-  const cycleRef = useRef(-1);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(0.85);
-
-  /* ── Live data ── */
-  const { data: apiData, isLoading, error, isFetching } = useMemoryGraphData();
-
-  const { apiNodes, apiEdges } = useMemo(function transform() {
-    if (!apiData) return { apiNodes: [] as Node[], apiEdges: [] as Edge[] };
-    return { apiNodes: transformApiData(apiData).nodes, apiEdges: transformApiData(apiData).edges };
-  }, [apiData]);
-
-  const [nodes, setNodes, onNodesChange] = useNodesState(apiNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(apiEdges);
-
-  useEffect(function syncData() {
-    if (apiNodes.length > 0) {
-      setNodes(apiNodes);
-      setEdges(apiEdges);
+  const graph = useMemo(() => {
+    if (!data) {
+      return { nodes: [], edges: [] };
     }
-  }, [apiNodes, apiEdges, setNodes, setEdges]);
+    return buildGraph(data, focusedRegion, selectedTopic?.id ?? null, selectedCluster?.id ?? null, selectedMemory?.id ?? null, hoveredNodeId);
+  }, [data, focusedRegion, selectedCluster, selectedMemory, selectedTopic, hoveredNodeId]);
 
-  /* ── Displayed nodes (with search + hover dimming) ── */
-  const displayedNodes = useMemo(function dn() {
-    if (ctx.quickSearchOpen && ctx.quickSearchQuery.trim()) {
-      var q = ctx.quickSearchQuery.toLowerCase();
-      return nodes.map(function m(n) {
-        if (n.type !== "memory") return n;
-        var d = n.data as unknown as MemoryNodeData;
-        var match = d.title.toLowerCase().includes(q) || d.snippet.toLowerCase().includes(q);
-        if (match) return n;
-        var s = Object.assign({}, n.style, { opacity: 0.15, transition: "opacity 200ms ease" });
-        return Object.assign({}, n, { style: s });
-      });
-    }
-    if (ctx.hoveredNodeId) {
-      var conn = connectedIds(edges, ctx.hoveredNodeId);
-      conn.add(ctx.hoveredNodeId);
-      return nodes.map(function m(n) {
-        if (n.type !== "memory") return n;
-        if (n.id === ctx.hoveredNodeId || conn.has(n.id)) return n;
-        var s = Object.assign({}, n.style, { opacity: 0.3, transition: "opacity 200ms ease" });
-        return Object.assign({}, n, { style: s });
-      });
-    }
-    return nodes;
-  }, [nodes, edges, ctx.hoveredNodeId, ctx.quickSearchOpen, ctx.quickSearchQuery]);
-
-  /* ── Displayed edges ── */
-  const displayedEdges = useMemo(function de() {
-    if (zoomLevel < 0.4) return [];
-    var result = limitEdges(edges, 8);
-    if (ctx.hoveredNodeId) {
-      result = result.map(function m(e) {
-        if (e.source === ctx.hoveredNodeId || e.target === ctx.hoveredNodeId) {
-          var s = Object.assign({}, e.style, { opacity: 0.6 });
-          return Object.assign({}, e, { style: s });
-        }
-        return e;
-      });
-    }
-    return result;
-  }, [edges, zoomLevel, ctx.hoveredNodeId]);
-
-  /* ── Inspector data ── */
-  const inspectorData = useMemo(function id() {
-    if (!ctx.selectedNodeId) return { nd: null as MemoryNodeData | null, conns: [] as ConnectionInfo[], navIds: [] as string[] };
-    const node = nodes.find(function f(n) { return n.id === ctx.selectedNodeId; });
-    if (!node || node.type !== "memory") return { nd: null as MemoryNodeData | null, conns: [] as ConnectionInfo[], navIds: [] as string[] };
-    const nd = node.data as unknown as MemoryNodeData;
-    const conns = edges
-      .filter(function f(e) { return e.source === ctx.selectedNodeId || e.target === ctx.selectedNodeId; })
-      .map(function m(e) {
-        const oid = e.source === ctx.selectedNodeId ? e.target : e.source;
-        const on = nodes.find(function f(n) { return n.id === oid; });
-        if (!on || on.type !== "memory") return null;
-        const od = on.data as unknown as MemoryNodeData;
-        return { nodeId: oid, title: od.title, cluster: od.cluster, edgeType: e.type || "association" } as ConnectionInfo;
-      })
-      .filter(Boolean) as ConnectionInfo[];
-    const navIds = nodes.filter(function f(n) { return n.type === "memory"; }).map(function m(n) { return n.id; });
-    return { nd, conns, navIds };
-  }, [ctx.selectedNodeId, nodes, edges]);
-
-  /* ── Command palette data ── */
-  const memNodes = useMemo(function mn() {
-    return nodes.filter(function f(n) { return n.type === "memory"; }).map(function m(n) {
-      return { id: n.id, data: n.data as unknown as MemoryNodeData };
-    });
-  }, [nodes]);
-
-  const goCluster = useCallback(function gc(cluster: ClusterKey) {
-    rf.fitView({ nodes: [{ id: "cluster-" + cluster }], duration: 300, padding: 0.3 });
-  }, [rf]);
-
-  /* ── Handlers ── */
-  const onNodeClick = useCallback(function nc(_: React.MouseEvent, node: Node) {
-    if (node.type === "memory") ctxRef.current.setSelectedNodeId(node.id);
-  }, []);
-
-  const onPaneClick = useCallback(function pc() {
-    ctxRef.current.setSelectedNodeId(null);
-  }, []);
-
-  const onNodeMouseEnter = useCallback(function nme(_: React.MouseEvent, node: Node) {
-    if (node.type === "memory") ctxRef.current.setHoveredNodeId(node.id);
-  }, []);
-
-  const onNodeMouseLeave = useCallback(function nml() {
-    ctxRef.current.setHoveredNodeId(null);
-  }, []);
-
-  const onMoveEnd = useCallback(function me(_: unknown, vp: { zoom: number }) {
-    setZoomLevel(vp.zoom);
-  }, []);
-
-  /* ── Keyboard shortcuts ── */
-  useEffect(function keys() {
-    function handler(e: KeyboardEvent) {
-      var tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if ((e.target as HTMLElement).isContentEditable) return;
-      var c = ctxRef.current;
-      switch (e.key) {
-        case "k":
-          if (e.metaKey || e.ctrlKey) { e.preventDefault(); c.setCmdPaletteOpen(true); }
-          break;
-        case "/":
-          e.preventDefault();
-          c.setQuickSearchOpen(!c.quickSearchOpen);
-          if (c.quickSearchOpen) c.setQuickSearchQuery("");
-          break;
-        case "f": case "F":
-          if (!e.metaKey && !e.ctrlKey) { e.preventDefault(); rf.fitView(fitViewOpts); }
-          break;
-        case "Escape":
-          e.preventDefault();
-          if (c.cmdPaletteOpen) c.setCmdPaletteOpen(false);
-          else if (c.quickSearchOpen) { c.setQuickSearchOpen(false); c.setQuickSearchQuery(""); }
-          else if (shortcutsOpen) setShortcutsOpen(false);
-          else c.setSelectedNodeId(null);
-          break;
-        case " ":
-          e.preventDefault();
-          if (c.selectedNodeId) c.setSelectedNodeId(null);
-          break;
-        case "Tab":
-          e.preventDefault();
-          cycleRef.current = (cycleRef.current + 1) % CLUSTER_ORDER.length;
-          var ck = CLUSTER_ORDER[cycleRef.current]; if (ck) goCluster(ck);
-          break;
-        case "?":
-          e.preventDefault();
-          setShortcutsOpen(function t(p) { return !p; });
-          break;
-        case "1": case "2": case "3": case "4": case "5":
-          var ck2 = CLUSTER_ORDER[parseInt(e.key) - 1]; if (ck2) goCluster(ck2);
-          break;
-        default: break;
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (!data) {
+        return;
       }
-    }
-    window.addEventListener("keydown", handler);
-    return function cl() { window.removeEventListener("keydown", handler); };
-  }, [rf, goCluster, shortcutsOpen]);
+      if (selectedCluster) {
+        const topicPos = REGION_POSITIONS[selectedCluster.cluster] ?? DEFAULT_POS;
+        void reactFlow.setCenter(topicPos.x + 360, topicPos.y + 180, { duration: 320, zoom: 1.06 });
+        return;
+      }
+      if (selectedTopic) {
+        const topicPos = REGION_POSITIONS[selectedTopic.cluster] ?? DEFAULT_POS;
+        void reactFlow.setCenter(topicPos.x + 320, topicPos.y + 160, { duration: 320, zoom: 0.96 });
+        return;
+      }
+      if (focusedRegion) {
+        const pos = REGION_POSITIONS[focusedRegion] ?? DEFAULT_POS;
+        void reactFlow.setCenter(pos.x + 180, pos.y + 120, { duration: 320, zoom: 0.86 });
+        return;
+      }
+      void reactFlow.fitView({ duration: 320, padding: 0.18 });
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [data, focusedRegion, reactFlow, selectedCluster, selectedTopic]);
 
-  var isEmpty = !isLoading && !error && nodes.length === 0;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (selectedMemoryId) {
+          setSelectedMemoryId(null);
+        } else if (selectedClusterId) {
+          setSelectedClusterId(null);
+        } else if (selectedTopicId) {
+          setSelectedTopicId(null);
+        } else if (focusedRegion) {
+          setFocusedRegion(null);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [focusedRegion, selectedClusterId, selectedMemoryId, selectedTopicId]);
+
+  const openRegion = (cluster: ClusterKey) => {
+    setFocusedRegion(cluster);
+    setSelectedTopicId(null);
+    setSelectedClusterId(null);
+    setSelectedMemoryId(null);
+  };
+
+  const openTopic = (topicId: string) => {
+    const topic = topicMap.get(topicId);
+    if (!topic) {
+      return;
+    }
+    setFocusedRegion(topic.cluster);
+    setSelectedTopicId(topicId);
+    setSelectedClusterId(null);
+    setSelectedMemoryId(null);
+  };
+
+  const openSemanticCluster = (clusterId: string) => {
+    const cluster = clusterMap.get(clusterId);
+    if (!cluster) {
+      return;
+    }
+    setFocusedRegion(cluster.cluster);
+    setSelectedTopicId(cluster.topic_id);
+    setSelectedClusterId(clusterId);
+    setSelectedMemoryId(null);
+  };
+
+  const openMemory = (memoryId: string) => {
+    const memory = memoryMap.get(memoryId);
+    const semanticClusterId = memoryToSemanticCluster.get(memoryId);
+    if (!memory || !semanticClusterId) {
+      return;
+    }
+    setFocusedRegion(memory.cluster);
+    setSelectedTopicId(memory.topic_id);
+    setSelectedClusterId(semanticClusterId);
+    setSelectedMemoryId(memoryId);
+  };
+
+  const onBack = () => {
+    if (selectedMemoryId) {
+      setSelectedMemoryId(null);
+      return;
+    }
+    if (selectedClusterId) {
+      setSelectedClusterId(null);
+      return;
+    }
+    if (selectedTopicId) {
+      setSelectedTopicId(null);
+      return;
+    }
+    setFocusedRegion(null);
+  };
+
+  const onNodeClick: NodeMouseHandler = (_, node) => {
+    if (node.id.startsWith("region-")) {
+      openRegion(node.id.replace("region-", "") as ClusterKey);
+      return;
+    }
+    if (node.id.startsWith("topic-")) {
+      openTopic(node.id.replace("topic-", ""));
+      return;
+    }
+    if (node.id.startsWith("semantic-cluster-")) {
+      openSemanticCluster(node.id.replace("semantic-cluster-", ""));
+      return;
+    }
+    if (node.id.startsWith("memory-particle-")) {
+      openMemory(node.id.replace("memory-particle-", ""));
+    }
+  };
+
+  const stateLabel = selectedMemory
+    ? "Cluster focus → memory detail"
+    : selectedCluster
+      ? "Cluster focus"
+      : selectedTopic
+        ? "Topic focus"
+        : focusedRegion
+          ? "Region focus"
+          : "Stable overview";
+
+  if (isLoading && !data) {
+    return (
+      <div className="memory-graph-shell">
+        <div className="mg-empty-state">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          <span>Loading Memory Graph v3…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="memory-graph-shell">
+        <div className="mg-empty-state mg-empty-error">
+          <AlertTriangle className="h-5 w-5" />
+          <div className="font-medium text-white">Memory Graph failed to load.</div>
+          <button className="mg-toolbar-button" onClick={() => refreshGraph()}>
+            <RefreshCw className="h-4 w-4" /> Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-full w-full">
-      <div className="relative min-w-0 flex-1 overflow-hidden bg-zinc-950" role="application" aria-label="Memory graph canvas">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-10%,rgba(99,102,241,0.04),transparent_60%)]" />
-        <ReactFlow
-          nodes={displayedNodes}
-          edges={displayedEdges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onNodeClick={onNodeClick}
-          onPaneClick={onPaneClick}
-          onNodeMouseEnter={onNodeMouseEnter}
-          onNodeMouseLeave={onNodeMouseLeave}
-          onMoveEnd={onMoveEnd}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          minZoom={0.15}
-          maxZoom={3.0}
-          defaultViewport={defaultViewport}
-          proOptions={proOpts}
-          fitView
-          fitViewOptions={fitViewOpts}
-          panOnDrag
-          zoomOnScroll
-          zoomOnPinch
-          panOnScroll={false}
-          selectionOnDrag={false}
-          className="!bg-transparent"
-        >
-          <Background variant={BackgroundVariant.Dots} gap={28} size={0.8} color="rgba(255,255,255,0.025)" />
-          <GraphMinimap />
-        </ReactFlow>
-        {isLoading && <LoadingState />}
-        {error && <ErrorToast message={error instanceof Error ? error.message : "Failed to load memory"} onRetry={ctx.refreshGraph} />}
-        {isEmpty && <EmptyState />}
-        {isFetching && !isLoading && (
-          <div className="absolute top-4 right-4 z-50" aria-label="Refreshing" role="status">
-            <Loader2 className="h-4 w-4 animate-spin text-white/30" />
-          </div>
-        )}
-        <ZoomControls />
-        <ShortcutOverlay open={shortcutsOpen} onClose={function cl() { setShortcutsOpen(false); }} />
-        {ctx.quickSearchOpen && <QuickSearchBar />}
-        {ctx.cmdPaletteOpen && (
-          <CommandPalette
-            open={ctx.cmdPaletteOpen}
-            onClose={function cl() { ctx.setCmdPaletteOpen(false); }}
-            nodes={memNodes}
-            onSelectNode={ctx.setSelectedNodeId}
-            onNavigateCluster={goCluster}
-            onRefresh={ctx.refreshGraph}
-          />
-        )}
+    <div className="memory-graph-shell">
+      <div className="mg-overlay-top">
+        <div className="mg-status-pill">
+          <span>Memory Graph v3</span>
+          <strong>{stateLabel}</strong>
+        </div>
+        <div className="mg-toolbar">
+          <button className="mg-toolbar-button" onClick={() => setFocusedRegion(null)} aria-label="Overview"><Maximize2 className="h-4 w-4" /></button>
+          <button className="mg-toolbar-button" onClick={() => reactFlow.zoomOut({ duration: 180 })} aria-label="Zoom out"><Minus className="h-4 w-4" /></button>
+          <button className="mg-toolbar-button" onClick={() => reactFlow.zoomIn({ duration: 180 })} aria-label="Zoom in"><Plus className="h-4 w-4" /></button>
+          <button className="mg-toolbar-button" onClick={() => reactFlow.fitView({ duration: 220, padding: 0.18 })} aria-label="Fit view"><Maximize2 className="h-4 w-4" /></button>
+          <button className="mg-toolbar-button" onClick={() => refreshGraph()} aria-label="Refresh"><RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} /></button>
+        </div>
       </div>
+
+      <div className="mg-insights-panel">
+        {insights.slice(0, 4).map((insight) => (
+          <div key={`${insight.type}-${insight.message}`} className="mg-insight-card">
+            <div className="mg-insight-type">{insight.type}</div>
+            <p>{insight.message}</p>
+          </div>
+        ))}
+      </div>
+
+      <ReactFlow
+        nodes={graph.nodes}
+        edges={graph.edges}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        fitView
+        minZoom={0.5}
+        maxZoom={1.5}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        panOnDrag
+        panOnScroll
+        onNodeClick={onNodeClick}
+        onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+        onNodeMouseLeave={() => setHoveredNodeId(null)}
+        onPaneClick={() => setHoveredNodeId(null)}
+        className="mg-reactflow"
+      >
+        <MiniMap
+          pannable
+          zoomable
+          nodeColor={(node) => {
+            const cluster = (node.data as { cluster?: ClusterKey } | undefined)?.cluster;
+            return cluster ? hexToRgba(CLUSTER_HUES[cluster], node.type === "region" ? 0.9 : 0.45) : "#64748b";
+          }}
+          maskColor="rgba(7, 10, 16, 0.72)"
+          style={{ width: 168, height: 112, borderRadius: 16, background: "rgba(8, 11, 18, 0.86)", border: "1px solid rgba(255,255,255,0.06)" }}
+        />
+        <Background color="rgba(255,255,255,0.06)" variant={BackgroundVariant.Dots} gap={28} size={1.3} />
+      </ReactFlow>
+
       <Inspector
-        nodeId={ctx.selectedNodeId}
-        nodeData={inspectorData.nd}
-        connections={inspectorData.conns}
-        onClose={function cl() { ctx.setSelectedNodeId(null); }}
-        onSelectNode={ctx.setSelectedNodeId}
-        navigableNodeIds={inspectorData.navIds}
+        region={selectedRegion}
+        regionTopics={regionTopics}
+        topic={selectedTopic}
+        topicClusters={topicClusters}
+        cluster={selectedCluster}
+        clusterMemories={clusterMemories}
+        memory={selectedMemory}
+        relatedMemories={relatedMemories}
+        onClose={() => {
+          setSelectedMemoryId(null);
+          setSelectedClusterId(null);
+          setSelectedTopicId(null);
+          setFocusedRegion(null);
+        }}
+        onBack={onBack}
+        onOpenTopic={openTopic}
+        onOpenCluster={openSemanticCluster}
+        onOpenMemory={openMemory}
       />
     </div>
   );
 }
 
-/* ── Exported Component ───────────────────── */
 export function MemoryGraphCanvas() {
   return (
-    <MemoryGraphProvider>
-      <div className="relative h-full w-full">
-        <InnerCanvas />
-      </div>
-    </MemoryGraphProvider>
+    <ReactFlowProvider>
+      <MemoryGraphInner />
+    </ReactFlowProvider>
   );
 }
