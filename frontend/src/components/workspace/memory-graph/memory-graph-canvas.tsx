@@ -407,14 +407,14 @@ function InnerCanvas() {
         case "Tab":
           e.preventDefault();
           cycleRef.current = (cycleRef.current + 1) % CLUSTER_ORDER.length;
-          goCluster(CLUSTER_ORDER[cycleRef.current]);
+          var ck = CLUSTER_ORDER[cycleRef.current]; if (ck) goCluster(ck);
           break;
         case "?":
           e.preventDefault();
           setShortcutsOpen(function t(p) { return !p; });
           break;
         case "1": case "2": case "3": case "4": case "5":
-          goCluster(CLUSTER_ORDER[parseInt(e.key) - 1]);
+          var ck2 = CLUSTER_ORDER[parseInt(e.key) - 1]; if (ck2) goCluster(ck2);
           break;
         default: break;
       }
