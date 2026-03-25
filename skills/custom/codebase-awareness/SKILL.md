@@ -69,8 +69,8 @@ Hindsight replaced Graphiti+FalkorDB as the memory backend. All memory operation
 **Test:**
 
 ## Recent Changes (Auto-Updated)
-_Last indexed: 2026-03-23 02:34 UTC_
+_Last indexed: 2026-03-24 14:27 UTC_
 
-The update removes the old Mem0 memory backend and re‑routes all structured memory look‑ups to the new **vesper_hindsight** module, which now provides `search_memories_sync` for synchronous calls during context assembly. Additionally, `vesper_context.py` now pulls the SOUL description, current UTC time (with last‑interaction delta), and active Postgres‑stored projects/tasks into the prompt, consolidating all contextual sources into a single ~800‑1,700‑token block. These changes streamline VESPER’s architecture by centralizing memory access through Hindsight and enriching the prompt with up‑to‑date project and timing data, improving relevance while reducing token bloat.
+The update refines VESPER’s core message‑handling pipeline: **ChannelManager** now extracts the final AI response text (including clarification and tool‑call cases) and isolates only the latest‑turn artifacts, ensuring the agent receives clean, context‑appropriate output. The **Telegram channel** adds a full Markdown‑to‑HTML conversion layer (with safe HTML escaping, code‑block handling, link formatting and automatic splitting to respect Telegram’s 4096‑char limit), so LLM‑generated messages render correctly for end‑users. Finally, the **gateway router** gains robust logic for locating the canonical ongoing Telegram thread—hon
 
-Changed files: backend/vesper_context.py, backend/vesper_hindsight.py
+Changed files: backend/src/channels/manager.py, backend/src/channels/telegram.py, backend/src/gateway/routers/channels.py
