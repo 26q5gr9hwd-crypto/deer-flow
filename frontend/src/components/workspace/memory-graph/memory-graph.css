@@ -1,0 +1,204 @@
+/* ── Memory Graph v1 — CSS Variables & Animations ── */
+
+/* Cluster hue variables */
+:root {
+  --mg-hue-identity: #6366f1;
+  --mg-hue-daniel: #f59e0b;
+  --mg-hue-world: #14b8a6;
+  --mg-hue-playbook: #8b5cf6;
+  --mg-hue-archive: #64748b;
+
+  /* State colors */
+  --mg-freshness-fresh: #22c55e;
+  --mg-freshness-aging: #eab308;
+  --mg-freshness-stale: #6b7280;
+  --mg-confidence-low: #ef4444;
+  --mg-confidence-mid: #eab308;
+  --mg-confidence-high: #22c55e;
+  --mg-health-green: #22c55e;
+  --mg-health-yellow: #eab308;
+  --mg-health-red: #ef4444;
+  --mg-health-gray: #6b7280;
+
+  /* Canvas */
+  --mg-canvas-bg: #09090b;
+  --mg-node-bg: rgba(24, 24, 27, 0.85);
+  --mg-border-subtle: rgba(255, 255, 255, 0.06);
+  --mg-text-primary: rgba(255, 255, 255, 0.90);
+  --mg-text-secondary: rgba(255, 255, 255, 0.55);
+  --mg-text-muted: rgba(255, 255, 255, 0.30);
+  --mg-text-faint: rgba(255, 255, 255, 0.20);
+}
+
+/* ── Entrance Animations ── */
+@keyframes mg-node-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.92) translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes mg-cluster-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes mg-fade-in {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@keyframes mg-pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes mg-slide-up {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Apply entrance animations */
+.mg-node-enter {
+  animation: mg-node-enter 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+.mg-cluster-enter {
+  animation: mg-cluster-enter 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+/* Stagger delays for nodes */
+.mg-stagger-1 { animation-delay: 0.04s; }
+.mg-stagger-2 { animation-delay: 0.08s; }
+.mg-stagger-3 { animation-delay: 0.12s; }
+.mg-stagger-4 { animation-delay: 0.16s; }
+.mg-stagger-5 { animation-delay: 0.20s; }
+.mg-stagger-6 { animation-delay: 0.24s; }
+.mg-stagger-7 { animation-delay: 0.28s; }
+.mg-stagger-8 { animation-delay: 0.32s; }
+.mg-stagger-9 { animation-delay: 0.36s; }
+
+/* ── Focus styles for accessibility ── */
+.mg-focusable:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* ── Hover transitions ── */
+.mg-memory-card {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+}
+
+.mg-memory-card:hover {
+  transform: translateY(-1px);
+}
+
+/* ── Health tooltip ── */
+.mg-health-dot {
+  position: relative;
+  cursor: help;
+}
+
+.mg-health-dot::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(24, 24, 27, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 10px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.mg-health-dot:hover::after {
+  opacity: 1;
+}
+
+/* ── Freshness dot tooltip ── */
+.mg-freshness-dot {
+  position: relative;
+}
+
+.mg-freshness-dot::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(24, 24, 27, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 10px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.mg-freshness-dot:hover::after {
+  opacity: 1;
+}
+
+/* ── Loading skeleton shimmer ── */
+@keyframes mg-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.mg-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.02) 0%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.02) 100%
+  );
+  background-size: 200% 100%;
+  animation: mg-shimmer 1.8s ease-in-out infinite;
+}
+
+/* ── Scrollbar styling for inspector ── */
+.mg-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.mg-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mg-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
+
+.mg-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}

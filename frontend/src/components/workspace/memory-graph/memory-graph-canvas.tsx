@@ -9,7 +9,8 @@ import {
 } from "@xyflow/react";
 import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Minus, Plus, Maximize2, Search as SearchIcon, X, Loader2, AlertTriangle } from "lucide-react";
+import "./memory-graph.css";
+import { Minus, Plus, Maximize2, Search as SearchIcon, X, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MemoryNode } from "./nodes/memory-node";
 import { ClusterNode } from "./nodes/cluster-node";
@@ -105,7 +106,6 @@ function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[]
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  // Group memories by cluster
   const grouped = new Map<ClusterKey, MemoryGraphData["memories"]>();
   for (const m of data.memories) {
     const ck = m.cluster as ClusterKey;
@@ -113,7 +113,6 @@ function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[]
     grouped.get(ck)!.push(m);
   }
 
-  // Build cluster + memory nodes
   for (const [ck, mems] of grouped) {
     const pos = CLUSTER_POS[ck] || { x: 380, y: 380 };
     const size = clusterSize(mems.length);
@@ -121,7 +120,7 @@ function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[]
     const clusterInfo = data.clusters.find(function f(c) { return c.key === ck; });
 
     const cdata: ClusterNodeData = {
-      cluster: ck, label: meta?.label || ck, icon: meta?.icon || "📦",
+      cluster: ck, label: meta?.label || ck, icon: meta?.icon || "\u{1F4E6}",
       count: mems.length, expanded: true,
       health: (clusterInfo?.health as "green" | "yellow" | "red" | "gray") || "green",
     };
@@ -148,7 +147,6 @@ function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[]
     });
   }
 
-  // Build edges
   for (const e of data.edges) {
     const etype = e.edge_type === "temporal" ? "temporal"
       : e.edge_type === "contradiction" ? "contradiction"
@@ -223,7 +221,7 @@ function ZoomControls() {
     };
   }, [resetTimer]);
 
-  const btn = "flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-black/40 text-white/60 backdrop-blur-xl transition-all duration-200 hover:bg-black/60 hover:text-white active:scale-95";
+  const btn = "mg-focusable flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-black/40 text-white/60 backdrop-blur-xl transition-all duration-200 hover:bg-black/60 hover:text-white active:scale-95";
   const ziO = { duration: 200 };
   const zoO = { duration: 200 };
   const fvO = { padding: 0.15, duration: 300 };
@@ -235,6 +233,8 @@ function ZoomControls() {
         visible ? "opacity-100" : "opacity-0 hover:opacity-100",
       )}
       onMouseEnter={function me() { setVisible(true); }}
+      role="toolbar"
+      aria-label="Zoom controls"
     >
       <button onClick={function zi() { rf.zoomIn(ziO); }} className={btn} aria-label="Zoom in" title="Zoom in">
         <Plus className="h-4 w-4" />
@@ -263,6 +263,7 @@ function GraphMinimap() {
       nodeColor={ncFn}
       pannable
       zoomable
+      aria-label="Graph minimap"
     />
   );
 }
@@ -282,7 +283,7 @@ const SHORTCUTS = [
 function ShortcutOverlay(p: { open: boolean; onClose: () => void }) {
   if (!p.open) return null;
   return (
-    <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={p.onClose} role="dialog" aria-label="Keyboard shortcuts">
+    <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={p.onClose} role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
       <div className="w-[360px] rounded-2xl border border-white/[0.08] bg-zinc-900/90 p-6 shadow-2xl backdrop-blur-xl" onClick={function stop(e) { e.stopPropagation(); }}>
         <h3 className="mb-5 text-[11px] font-medium uppercase tracking-[0.3em] text-white/40">Keyboard shortcuts</h3>
         <div className="flex flex-col gap-1">
@@ -304,17 +305,16 @@ function ShortcutOverlay(p: { open: boolean; onClose: () => void }) {
 /* ── LoadingState ─────────────────────────── */
 function LoadingState() {
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label="Loading memory graph">
       <div className="flex flex-col items-center gap-4">
-        {/* Skeleton cluster placeholders */}
         <div className="flex gap-8">
           {[0, 1, 2].map(function sk(i) {
             return (
-              <div key={i} className="h-32 w-48 animate-pulse rounded-2xl border border-white/[0.04] bg-white/[0.02]">
+              <div key={i} className="mg-skeleton h-32 w-48 rounded-2xl border border-white/[0.04]">
                 <div className="flex flex-col gap-2 p-4">
-                  <div className="h-3 w-20 animate-pulse rounded bg-white/[0.06]" />
-                  <div className="h-10 w-full animate-pulse rounded-lg bg-white/[0.03]" />
-                  <div className="h-10 w-full animate-pulse rounded-lg bg-white/[0.03]" />
+                  <div className="mg-skeleton h-3 w-20 rounded" />
+                  <div className="mg-skeleton h-10 w-full rounded-lg" />
+                  <div className="mg-skeleton h-10 w-full rounded-lg" />
                 </div>
               </div>
             );
@@ -322,7 +322,7 @@ function LoadingState() {
         </div>
         <div className="flex items-center gap-2 text-[13px] text-white/30">
           <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading memory graph{"\u2026"}</span>
+          <span>Loading memory{"\u2026"}</span>
         </div>
       </div>
     </div>
@@ -330,12 +330,21 @@ function LoadingState() {
 }
 
 /* ── ErrorToast ───────────────────────────── */
-function ErrorToast(p: { message: string }) {
+function ErrorToast(p: { message: string; onRetry?: () => void }) {
   return (
-    <div className="absolute bottom-6 left-1/2 z-[90] -translate-x-1/2">
+    <div className="absolute bottom-6 left-1/2 z-[90] -translate-x-1/2" role="alert">
       <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-950/80 px-4 py-2.5 text-[13px] text-red-300 shadow-2xl backdrop-blur-xl">
-        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+        <AlertTriangle className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
         <span>{p.message}</span>
+        {p.onRetry && (
+          <button
+            onClick={p.onRetry}
+            className="mg-focusable ml-2 flex items-center gap-1 rounded-lg border border-red-500/20 px-2 py-1 text-[11px] text-red-300 transition-colors hover:bg-red-500/10"
+            aria-label="Retry loading"
+          >
+            <RefreshCw className="h-3 w-3" /> Retry
+          </button>
+        )}
       </div>
     </div>
   );
@@ -344,7 +353,7 @@ function ErrorToast(p: { message: string }) {
 /* ── EmptyState ───────────────────────────── */
 function EmptyState() {
   return (
-    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center" role="status">
       <div className="relative flex flex-col items-center">
         <div className="absolute -top-24 h-48 w-48 rounded-full bg-indigo-500/[0.05] blur-[80px]" />
         <div className="absolute -top-16 h-32 w-32 rounded-full bg-violet-500/[0.04] blur-[60px]" />
@@ -368,7 +377,7 @@ function QuickSearchBar() {
   return (
     <div className="absolute left-1/2 top-4 z-[70] -translate-x-1/2">
       <div className="flex w-[400px] max-w-[90vw] items-center gap-2 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-xl">
-        <SearchIcon className="h-4 w-4 flex-shrink-0 text-white/30" />
+        <SearchIcon className="h-4 w-4 flex-shrink-0 text-white/30" aria-hidden="true" />
         <input
           ref={inputRef}
           value={ctx.quickSearchQuery}
@@ -378,10 +387,16 @@ function QuickSearchBar() {
           }}
           placeholder={"Search memories\u2026"}
           className="flex-1 bg-transparent text-[14px] text-white/80 outline-none placeholder:text-white/25"
+          aria-label="Search memories"
+          role="searchbox"
         />
         {ctx.quickSearchQuery && (
-          <button onClick={function cl() { ctx.setQuickSearchQuery(""); ctx.setQuickSearchOpen(false); }} className="text-white/30 hover:text-white/60">
-            <X className="h-3.5 w-3.5" />
+          <button
+            onClick={function cl() { ctx.setQuickSearchQuery(""); ctx.setQuickSearchOpen(false); }}
+            className="mg-focusable flex h-5 w-5 items-center justify-center rounded text-white/30 transition-colors hover:text-white/60"
+            aria-label="Clear search"
+          >
+            <X className="h-3 w-3" />
           </button>
         )}
       </div>
@@ -390,72 +405,53 @@ function QuickSearchBar() {
 }
 
 /* ── InnerCanvas ──────────────────────────── */
-const defaultViewport = { x: 0, y: 0, zoom: 0.85 };
 const proOpts = { hideAttribution: true };
-const fitViewOpts = { padding: 0.12 };
+const defaultViewport = { x: 0, y: 0, zoom: 0.85 };
+const fitViewOpts = { padding: 0.2, duration: 300 };
 
 function InnerCanvas() {
   const rf = useReactFlow();
   const ctx = useContext(Ctx);
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
-
+  const cycleRef = useRef(-1);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(0.85);
-  const cycleRef = useRef(0);
 
-  /* ── Live data from API ── */
-  const { data: graphData, isLoading, error, isFetching } = useMemoryGraphData();
+  /* ── Live data ── */
+  const { data: apiData, isLoading, error, isFetching } = useMemoryGraphData();
 
-  const transformed = useMemo(function xf() {
-    if (!graphData || graphData.memories.length === 0) return { nodes: [] as Node[], edges: [] as Edge[] };
-    return transformApiData(graphData);
-  }, [graphData]);
+  const { apiNodes, apiEdges } = useMemo(function transform() {
+    if (!apiData) return { apiNodes: [] as Node[], apiEdges: [] as Edge[] };
+    return { apiNodes: transformApiData(apiData).nodes, apiEdges: transformApiData(apiData).edges };
+  }, [apiData]);
 
-  const [nodes, , onNodesChange] = useNodesState(transformed.nodes);
-  const [edges, , onEdgesChange] = useEdgesState(transformed.edges);
+  const [nodes, setNodes, onNodesChange] = useNodesState(apiNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(apiEdges);
 
-  /* Sync nodes/edges when API data changes */
-  useEffect(function syncNodes() {
-    if (transformed.nodes.length > 0) {
-      onNodesChange(transformed.nodes.map(function m(n) { return { type: "replace" as const, id: n.id, item: n }; }));
+  useEffect(function syncData() {
+    if (apiNodes.length > 0) {
+      setNodes(apiNodes);
+      setEdges(apiEdges);
     }
-  }, [transformed.nodes]);
+  }, [apiNodes, apiEdges, setNodes, setEdges]);
 
-  useEffect(function syncEdges() {
-    if (transformed.edges.length > 0) {
-      onEdgesChange(transformed.edges.map(function m(e) { return { type: "replace" as const, id: e.id, item: e }; }));
-    }
-  }, [transformed.edges]);
-
-  /* ── Animated centering on selection ── */
-  useEffect(function centerOnSelect() {
-    if (!ctx.selectedNodeId) return;
-    const node = nodes.find(function f(n) { return n.id === ctx.selectedNodeId; });
-    if (!node) return;
-    var ax = node.position.x + 90;
-    var ay = node.position.y + 28;
-    if (node.parentId) {
-      const par = nodes.find(function f(n) { return n.id === node.parentId; });
-      if (par) { ax += par.position.x; ay += par.position.y; }
-    }
-    rf.setCenter(ax, ay, { duration: 200 });
-  }, [ctx.selectedNodeId]);
-
-  /* ── Displayed nodes (hover highlight + search filter) ── */
+  /* ── Displayed nodes (with search + hover dimming) ── */
   const displayedNodes = useMemo(function dn() {
     if (ctx.quickSearchOpen && ctx.quickSearchQuery.trim()) {
-      const q = ctx.quickSearchQuery.trim().toLowerCase();
+      var q = ctx.quickSearchQuery.toLowerCase();
       return nodes.map(function m(n) {
         if (n.type !== "memory") return n;
-        const d = n.data as unknown as MemoryNodeData;
-        if (d.title.toLowerCase().includes(q)) return n;
-        const s = Object.assign({}, n.style, { opacity: 0.15, transition: "opacity 200ms ease" });
+        var d = n.data as unknown as MemoryNodeData;
+        var match = d.title.toLowerCase().includes(q) || d.snippet.toLowerCase().includes(q);
+        if (match) return n;
+        var s = Object.assign({}, n.style, { opacity: 0.15, transition: "opacity 200ms ease" });
         return Object.assign({}, n, { style: s });
       });
     }
     if (ctx.hoveredNodeId) {
-      const conn = connectedIds(edges, ctx.hoveredNodeId);
+      var conn = connectedIds(edges, ctx.hoveredNodeId);
+      conn.add(ctx.hoveredNodeId);
       return nodes.map(function m(n) {
         if (n.type !== "memory") return n;
         if (n.id === ctx.hoveredNodeId || conn.has(n.id)) return n;
@@ -587,7 +583,7 @@ function InnerCanvas() {
 
   return (
     <div className="flex h-full w-full">
-      <div className="relative min-w-0 flex-1 overflow-hidden bg-zinc-950">
+      <div className="relative min-w-0 flex-1 overflow-hidden bg-zinc-950" role="application" aria-label="Memory graph canvas">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-10%,rgba(99,102,241,0.04),transparent_60%)]" />
         <ReactFlow
           nodes={displayedNodes}
@@ -618,10 +614,10 @@ function InnerCanvas() {
           <GraphMinimap />
         </ReactFlow>
         {isLoading && <LoadingState />}
-        {error && <ErrorToast message={error instanceof Error ? error.message : "Failed to load memory graph"} />}
+        {error && <ErrorToast message={error instanceof Error ? error.message : "Failed to load memory"} onRetry={ctx.refreshGraph} />}
         {isEmpty && <EmptyState />}
         {isFetching && !isLoading && (
-          <div className="absolute top-4 right-4 z-50">
+          <div className="absolute top-4 right-4 z-50" aria-label="Refreshing" role="status">
             <Loader2 className="h-4 w-4 animate-spin text-white/30" />
           </div>
         )}

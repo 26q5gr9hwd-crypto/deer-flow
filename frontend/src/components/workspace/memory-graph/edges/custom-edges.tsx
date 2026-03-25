@@ -12,7 +12,7 @@ function AssociationEdgeInner(props: EdgeProps) {
   };
   const [path] = getBezierPath(bp);
   const color = (props.data as any)?.color || "rgba(148,163,184,0.15)";
-  const s = { stroke: color, strokeWidth: 1 };
+  const s = { stroke: color, strokeWidth: 1, transition: "stroke 0.2s ease, opacity 0.2s ease" };
   return <BaseEdge path={path} style={s} />;
 }
 
@@ -23,7 +23,7 @@ function TemporalEdgeInner(props: EdgeProps) {
     sourcePosition: props.sourcePosition, targetPosition: props.targetPosition,
   };
   const [path] = getBezierPath(bp);
-  const s = { stroke: "rgba(100,116,139,0.10)", strokeWidth: 1, strokeDasharray: "4 4" };
+  const s = { stroke: "rgba(100,116,139,0.10)", strokeWidth: 1, strokeDasharray: "4 4", transition: "opacity 0.2s ease" };
   return <BaseEdge path={path} style={s} />;
 }
 
@@ -34,12 +34,12 @@ function ContradictionEdgeInner(props: EdgeProps) {
     sourcePosition: props.sourcePosition, targetPosition: props.targetPosition,
   };
   const [path, labelX, labelY] = getBezierPath(bp);
-  const s = { stroke: "rgba(239,68,68,0.30)", strokeWidth: 1, strokeDasharray: "6 3" };
+  const s = { stroke: "rgba(239,68,68,0.30)", strokeWidth: 1, strokeDasharray: "6 3", transition: "opacity 0.2s ease" };
   return (
     <>
       <BaseEdge path={path} style={s} />
       <foreignObject x={labelX - 8} y={labelY - 8} width={16} height={16} className="pointer-events-none">
-        <div className="flex h-full w-full items-center justify-center text-[10px]">⚡</div>
+        <div className="flex h-full w-full items-center justify-center text-[10px]" aria-label="Contradiction">&#x26A1;</div>
       </foreignObject>
     </>
   );

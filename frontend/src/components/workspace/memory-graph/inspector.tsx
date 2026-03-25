@@ -45,12 +45,10 @@ const ACTIONS = [
   { label: "Archive", Icon: Archive, action: "archive" },
 ];
 
-/* animation consts — extracted to avoid double-brace corruption */
+/* animation consts */
 const SLIDE_INIT = { x: 380, opacity: 0 };
 const SLIDE_IN = { x: 0, opacity: 1 };
 const SLIDE_TR = { duration: 0.2, ease: "easeOut" as const };
-const FADE_IN = { opacity: 0 };
-const FADE_VIS = { opacity: 1 };
 const SHEET_FROM = { y: "100%" };
 const SHEET_TO = { y: "0%" };
 const SHEET_TR = { type: "spring" as const, stiffness: 300, damping: 30 };
@@ -114,23 +112,24 @@ function InnerContent(p: {
         </div>
         <button
           onClick={p.onClose}
-          className="ml-3 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/60"
+          className="mg-focusable ml-3 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/60"
+          aria-label="Close inspector"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+      <div className="mg-scrollbar flex-1 space-y-5 overflow-y-auto px-5 py-4">
         <div>
           <p className="text-[13px] leading-relaxed text-white/70">{d.title}</p>
-          <p className="mt-1 text-[12px] text-white/40">{d.snippet}</p>
+          <p className="mt-1 text-[12px] text-white/40 break-words">{d.snippet}</p>
         </div>
 
         <div className="space-y-2">
           <h4 className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/25">Details</h4>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px]">
             <div className="flex justify-between">
-              <span className="text-white/30">Source</span>
+              <span className="text-white/30">Origin</span>
               <span className="text-white/55">{meta.label}</span>
             </div>
             <div className="flex justify-between">
@@ -165,9 +164,10 @@ function InnerContent(p: {
                       <button
                         key={c.nodeId}
                         onClick={function goNode() { p.onSelectNode(c.nodeId); }}
-                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] text-white/55 transition-colors hover:bg-white/[0.04]"
+                        className="mg-focusable flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] text-white/55 transition-colors hover:bg-white/[0.04]"
+                        aria-label={"Navigate to " + c.title}
                       >
-                        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={dotBg} />
+                        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={dotBg} aria-hidden="true" />
                         <span className="truncate">{c.title}</span>
                       </button>
                     );
@@ -185,14 +185,16 @@ function InnerContent(p: {
         <button
           disabled={!prevId}
           onClick={function goPrev() { prevId && p.onSelectNode(prevId); }}
-          className="flex items-center gap-1 text-[12px] text-white/40 disabled:opacity-20"
+          className="mg-focusable flex items-center gap-1 text-[12px] text-white/40 disabled:opacity-20"
+          aria-label="Previous memory"
         >
           <ChevronLeft className="h-3 w-3" /> Prev
         </button>
         <button
           disabled={!nextId}
           onClick={function goNext() { nextId && p.onSelectNode(nextId); }}
-          className="flex items-center gap-1 text-[12px] text-white/40 disabled:opacity-20"
+          className="mg-focusable flex items-center gap-1 text-[12px] text-white/40 disabled:opacity-20"
+          aria-label="Next memory"
         >
           Next <ChevronRight className="h-3 w-3" />
         </button>
@@ -204,7 +206,8 @@ function InnerContent(p: {
             <button
               key={btn.action}
               onClick={stub(btn.action)}
-              className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 text-[11px] text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+              className="mg-focusable flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 text-[11px] text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+              aria-label={btn.label}
             >
               <btn.Icon className="h-3 w-3" />
               {btn.label}
@@ -216,84 +219,78 @@ function InnerContent(p: {
   );
 }
 
-function DesktopPanel(props: InspectorProps & { nodeData: MemoryNodeData }) {
-  return (
-    <motion.div
-      initial={SLIDE_INIT}
-      animate={SLIDE_IN}
-      exit={SLIDE_INIT}
-      transition={SLIDE_TR}
-      className="h-full w-[380px] flex-shrink-0 border-l border-white/[0.06] bg-zinc-950/95 backdrop-blur-xl"
-    >
-      <InnerContent
-        nodeData={props.nodeData}
-        connections={props.connections}
-        onClose={props.onClose}
-        onSelectNode={props.onSelectNode}
-        navigableNodeIds={props.navigableNodeIds}
-        nodeId={props.nodeId!}
-      />
-    </motion.div>
-  );
-}
+export function Inspector(p: InspectorProps) {
+  const show = p.nodeId !== null && p.nodeData !== null;
 
-function MobileSheet(props: InspectorProps & { nodeData: MemoryNodeData }) {
+  useEffect(function trapEsc() {
+    if (!show) return;
+    function handler(e: KeyboardEvent) {
+      if (e.key === "Escape") p.onClose();
+    }
+    window.addEventListener("keydown", handler);
+    return function cl() { window.removeEventListener("keydown", handler); };
+  }, [show, p.onClose]);
+
   return (
     <>
-      <motion.div
-        initial={FADE_IN}
-        animate={FADE_VIS}
-        exit={FADE_IN}
-        className="absolute inset-0 z-40 bg-black/30"
-        onClick={props.onClose}
-      />
-      <motion.div
-        initial={SHEET_FROM}
-        animate={SHEET_TO}
-        exit={SHEET_FROM}
-        transition={SHEET_TR}
-        drag="y"
-        dragConstraints={DRAG_TOP}
-        dragElastic={0.2}
-        onDragEnd={function onDragEnd(_: unknown, info: { offset: { y: number } }) {
-          if (info.offset.y > 100) props.onClose();
-        }}
-        className="absolute bottom-0 left-0 right-0 z-50 overflow-hidden rounded-t-2xl border-t border-white/[0.08] bg-zinc-950/[0.98] backdrop-blur-xl"
-        style={SHEET_H}
-      >
-        <div className="flex justify-center pb-1 pt-2">
-          <div className="h-1 w-10 rounded-full bg-white/20" />
-        </div>
-        <InnerContent
-          nodeData={props.nodeData}
-          connections={props.connections}
-          onClose={props.onClose}
-          onSelectNode={props.onSelectNode}
-          navigableNodeIds={props.navigableNodeIds}
-          nodeId={props.nodeId!}
-        />
-      </motion.div>
+      {/* Desktop panel */}
+      <AnimatePresence>
+        {show && (
+          <motion.aside
+            key="inspector-desktop"
+            initial={SLIDE_INIT}
+            animate={SLIDE_IN}
+            exit={SLIDE_INIT}
+            transition={SLIDE_TR}
+            className="hidden lg:flex h-full w-[380px] flex-shrink-0 flex-col border-l border-white/[0.06] bg-zinc-950/95 backdrop-blur-xl"
+            role="complementary"
+            aria-label="Memory inspector"
+          >
+            <InnerContent
+              nodeData={p.nodeData!}
+              connections={p.connections}
+              onClose={p.onClose}
+              onSelectNode={p.onSelectNode}
+              navigableNodeIds={p.navigableNodeIds}
+              nodeId={p.nodeId!}
+            />
+          </motion.aside>
+        )}
+      </AnimatePresence>
+
+      {/* Mobile bottom sheet */}
+      <AnimatePresence>
+        {show && (
+          <motion.div
+            key="inspector-mobile"
+            initial={SHEET_FROM}
+            animate={SHEET_TO}
+            exit={SHEET_FROM}
+            transition={SHEET_TR}
+            drag="y"
+            dragConstraints={DRAG_TOP}
+            dragElastic={0.1}
+            onDragEnd={function de(_: any, info: any) { if (info.offset.y > 100) p.onClose(); }}
+            className="fixed inset-x-0 bottom-0 z-[60] flex flex-col overflow-hidden rounded-t-2xl border-t border-white/[0.08] bg-zinc-950/95 backdrop-blur-xl lg:hidden"
+            style={SHEET_H}
+            role="dialog"
+            aria-label="Memory details"
+            aria-modal="true"
+          >
+            <div className="flex justify-center py-2">
+              <div className="h-1 w-10 rounded-full bg-white/[0.15]" />
+            </div>
+            <InnerContent
+              nodeData={p.nodeData!}
+              connections={p.connections}
+              onClose={p.onClose}
+              onSelectNode={p.onSelectNode}
+              navigableNodeIds={p.navigableNodeIds}
+              nodeId={p.nodeId!}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
-  );
-}
-
-export function Inspector(props: InspectorProps) {
-  const [isDesktop, setIsDesktop] = React.useState(true);
-  useEffect(function watchMQ() {
-    const mq = window.matchMedia("(min-width: 1024px)");
-    setIsDesktop(mq.matches);
-    const h = function onMQ(e: MediaQueryListEvent) { setIsDesktop(e.matches); };
-    mq.addEventListener("change", h);
-    return function cleanup() { mq.removeEventListener("change", h); };
-  }, []);
-
-  const show = props.nodeId != null && props.nodeData != null;
-  return (
-    <AnimatePresence mode="wait">
-      {show && (isDesktop
-        ? <DesktopPanel key="desktop-insp" {...props} nodeData={props.nodeData!} />
-        : <MobileSheet key="mobile-insp" {...props} nodeData={props.nodeData!} />
-      )}
-    </AnimatePresence>
   );
 }
