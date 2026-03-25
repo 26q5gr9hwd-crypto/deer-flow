@@ -540,7 +540,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="rounded-[2rem] border border-border/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(247,243,236,0.88))] p-6 shadow-[0_18px_44px_rgba(46,38,28,0.08)] md:p-7">
+      <section className="rounded-[2rem] border border-border/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(247,243,236,0.88))] p-6 shadow-[0_18px_44px_rgba(46,38,28,0.08)] dark:bg-[linear-gradient(180deg,rgba(28,32,36,0.9),rgba(20,24,28,0.96))] dark:shadow-[0_24px_60px_rgba(8,12,16,0.32)] md:p-7">
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.12fr)_minmax(300px,0.88fr)]">
           <div>
             <div className="text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
