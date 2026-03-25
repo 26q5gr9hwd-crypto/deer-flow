@@ -24,6 +24,7 @@ export interface CommandPaletteProps {
   nodes: Array<{ id: string; data: MemoryNodeData }>;
   onSelectNode: (id: string) => void;
   onNavigateCluster: (cluster: ClusterKey) => void;
+  onRefresh?: () => void;
 }
 
 /* ── Consts ─────────────────────────────────────── */
@@ -48,7 +49,7 @@ function fuzzy(q: string, text: string): number {
 
 /* ── Component ──────────────────────────────────── */
 export function CommandPalette(props: CommandPaletteProps) {
-  const { open, onClose, nodes, onSelectNode, onNavigateCluster } = props;
+  const { open, onClose, nodes, onSelectNode, onNavigateCluster, onRefresh } = props;
   const [query, setQuery] = useState("");
   const [selIdx, setSelIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -68,7 +69,7 @@ export function CommandPalette(props: CommandPaletteProps) {
       { id: "find-related", label: "Find related", Icon: Search, keywords: ["find", "related"], handler: onClose },
       { id: "find-contradictions", label: "Find contradictions", Icon: AlertTriangle, keywords: ["find", "contradictions"], handler: onClose },
       { id: "find-gaps", label: "Find gaps", Icon: HelpCircle, keywords: ["find", "gaps"], handler: onClose },
-      { id: "refresh", label: "Refresh", Icon: RefreshCw, keywords: ["refresh", "reload"], handler: onClose },
+      { id: "refresh", label: "Refresh", Icon: RefreshCw, keywords: ["refresh", "reload"], handler: function h() { if (onRefresh) onRefresh(); onClose(); } },
       { id: "export", label: "Export", Icon: Download, keywords: ["export", "json"], handler: onClose },
     ];
   }, [onClose, onNavigateCluster]);

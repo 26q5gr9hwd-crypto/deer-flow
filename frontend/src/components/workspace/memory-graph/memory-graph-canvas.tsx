@@ -9,16 +9,18 @@ import {
 } from "@xyflow/react";
 import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Minus, Plus, Maximize2, Search as SearchIcon, X } from "lucide-react";
+import { Minus, Plus, Maximize2, Search as SearchIcon, X, Loader2, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MemoryNode } from "./nodes/memory-node";
 import { ClusterNode } from "./nodes/cluster-node";
 import { AssociationEdge, TemporalEdge, ContradictionEdge } from "./edges/custom-edges";
-import { generateMockGraphData } from "./mock-data";
 import { Inspector } from "./inspector";
 import type { ConnectionInfo } from "./inspector";
 import { CommandPalette } from "./command-palette";
-import type { MemoryNodeData, ClusterKey } from "./types";
+import { CLUSTER_HUES, CLUSTER_META, hexToRgba } from "./types";
+import type { MemoryNodeData, ClusterNodeData, ClusterKey } from "./types";
+import { useMemoryGraphData, useRefreshMemoryGraph } from "@/core/memory-graph";
+import type { MemoryGraphData } from "@/core/memory-graph";
 
 /* ── Stable refs outside component ────────── */
 const nodeTypes = { memory: MemoryNode, cluster: ClusterNode };
@@ -37,6 +39,7 @@ type CtxValue = {
   setQuickSearchOpen: (o: boolean) => void;
   quickSearchQuery: string;
   setQuickSearchQuery: (q: string) => void;
+  refreshGraph: () => void;
 };
 
 const CTX_DEF: CtxValue = {
@@ -45,6 +48,7 @@ const CTX_DEF: CtxValue = {
   cmdPaletteOpen: false, setCmdPaletteOpen: function noop() {},
   quickSearchOpen: false, setQuickSearchOpen: function noop() {},
   quickSearchQuery: "", setQuickSearchQuery: function noop() {},
+  refreshGraph: function noop() {},
 };
 
 const Ctx = createContext<CtxValue>(CTX_DEF);
@@ -56,6 +60,7 @@ function MemoryGraphProvider(p: { children: React.ReactNode }) {
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [quickSearchOpen, setQuickSearchOpen] = useState(false);
   const [quickSearchQuery, setQuickSearchQuery] = useState("");
+  const refreshGraph = useRefreshMemoryGraph();
 
   const value = useMemo(function memo() {
     return {
@@ -64,14 +69,110 @@ function MemoryGraphProvider(p: { children: React.ReactNode }) {
       cmdPaletteOpen, setCmdPaletteOpen,
       quickSearchOpen, setQuickSearchOpen,
       quickSearchQuery, setQuickSearchQuery,
+      refreshGraph,
     };
-  }, [selectedNodeId, hoveredNodeId, cmdPaletteOpen, quickSearchOpen, quickSearchQuery]);
+  }, [selectedNodeId, hoveredNodeId, cmdPaletteOpen, quickSearchOpen, quickSearchQuery, refreshGraph]);
 
   return (
     <Ctx.Provider value={value}>
       <ReactFlowProvider>{p.children}</ReactFlowProvider>
     </Ctx.Provider>
   );
+}
+
+/* ── Transform API data to React Flow nodes/edges ── */
+const CLUSTER_POS: Record<ClusterKey, { x: number; y: number }> = {
+  identity: { x: 60, y: 80 },
+  daniel:   { x: 700, y: 80 },
+  world:    { x: 60, y: 380 },
+  playbook: { x: 700, y: 380 },
+  archive:  { x: 380, y: 640 },
+};
+
+const NW = 180, NH = 56, GX = 16, GY = 14, PAD = 20, HDR = 16, COLS = 3;
+
+function clusterSize(n: number) {
+  const cols = Math.min(n, COLS);
+  const rows = Math.ceil(n / COLS);
+  return { width: cols * (NW + GX) - GX + PAD * 2, height: HDR + rows * (NH + GY) - GY + PAD * 2 };
+}
+
+function nodePos(i: number) {
+  return { x: PAD + (i % COLS) * (NW + GX), y: HDR + PAD + Math.floor(i / COLS) * (NH + GY) };
+}
+
+function transformApiData(data: MemoryGraphData): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+
+  // Group memories by cluster
+  const grouped = new Map<ClusterKey, MemoryGraphData["memories"]>();
+  for (const m of data.memories) {
+    const ck = m.cluster as ClusterKey;
+    if (!grouped.has(ck)) grouped.set(ck, []);
+    grouped.get(ck)!.push(m);
+  }
+
+  // Build cluster + memory nodes
+  for (const [ck, mems] of grouped) {
+    const pos = CLUSTER_POS[ck] || { x: 380, y: 380 };
+    const size = clusterSize(mems.length);
+    const meta = CLUSTER_META[ck];
+    const clusterInfo = data.clusters.find(function f(c) { return c.key === ck; });
+
+    const cdata: ClusterNodeData = {
+      cluster: ck, label: meta?.label || ck, icon: meta?.icon || "📦",
+      count: mems.length, expanded: true,
+      health: (clusterInfo?.health as "green" | "yellow" | "red" | "gray") || "green",
+    };
+    nodes.push({
+      id: "cluster-" + ck, type: "cluster", position: pos,
+      data: cdata as any, style: { width: size.width, height: size.height },
+      draggable: true, selectable: false,
+    });
+
+    mems.forEach(function iter(m, i) {
+      const mdata: MemoryNodeData = {
+        title: m.title,
+        snippet: m.snippet,
+        cluster: ck,
+        freshness: m.freshness as MemoryNodeData["freshness"],
+        confidence: m.confidence,
+        importance: m.importance as MemoryNodeData["importance"],
+      };
+      nodes.push({
+        id: m.id, type: "memory", position: nodePos(i),
+        parentId: "cluster-" + ck, extent: "parent" as const,
+        draggable: false, data: mdata as any,
+      });
+    });
+  }
+
+  // Build edges
+  for (const e of data.edges) {
+    const etype = e.edge_type === "temporal" ? "temporal"
+      : e.edge_type === "contradiction" ? "contradiction"
+      : "association";
+
+    let color = "rgba(148,163,184,0.15)";
+    if (etype === "association") {
+      const srcMem = data.memories.find(function f(m) { return m.id === e.source; });
+      if (srcMem) {
+        const hue = CLUSTER_HUES[srcMem.cluster as ClusterKey];
+        if (hue) color = hexToRgba(hue, 0.15);
+      }
+    }
+
+    edges.push({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      type: etype,
+      data: { color },
+    });
+  }
+
+  return { nodes, edges };
 }
 
 /* ── Helpers ───────────────────────────────── */
@@ -200,6 +301,46 @@ function ShortcutOverlay(p: { open: boolean; onClose: () => void }) {
   );
 }
 
+/* ── LoadingState ─────────────────────────── */
+function LoadingState() {
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+      <div className="flex flex-col items-center gap-4">
+        {/* Skeleton cluster placeholders */}
+        <div className="flex gap-8">
+          {[0, 1, 2].map(function sk(i) {
+            return (
+              <div key={i} className="h-32 w-48 animate-pulse rounded-2xl border border-white/[0.04] bg-white/[0.02]">
+                <div className="flex flex-col gap-2 p-4">
+                  <div className="h-3 w-20 animate-pulse rounded bg-white/[0.06]" />
+                  <div className="h-10 w-full animate-pulse rounded-lg bg-white/[0.03]" />
+                  <div className="h-10 w-full animate-pulse rounded-lg bg-white/[0.03]" />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-2 text-[13px] text-white/30">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span>Loading memory graph{"\u2026"}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── ErrorToast ───────────────────────────── */
+function ErrorToast(p: { message: string }) {
+  return (
+    <div className="absolute bottom-6 left-1/2 z-[90] -translate-x-1/2">
+      <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-950/80 px-4 py-2.5 text-[13px] text-red-300 shadow-2xl backdrop-blur-xl">
+        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+        <span>{p.message}</span>
+      </div>
+    </div>
+  );
+}
+
 /* ── EmptyState ───────────────────────────── */
 function EmptyState() {
   return (
@@ -235,7 +376,7 @@ function QuickSearchBar() {
           onKeyDown={function kd(e) {
             if (e.key === "Escape") { e.preventDefault(); ctx.setQuickSearchQuery(""); ctx.setQuickSearchOpen(false); }
           }}
-          placeholder="Search memories\u2026"
+          placeholder={"Search memories\u2026"}
           className="flex-1 bg-transparent text-[14px] text-white/80 outline-none placeholder:text-white/25"
         />
         {ctx.quickSearchQuery && (
@@ -263,9 +404,29 @@ function InnerCanvas() {
   const [zoomLevel, setZoomLevel] = useState(0.85);
   const cycleRef = useRef(0);
 
-  const mockData = useMemo(function md() { return generateMockGraphData(); }, []);
-  const [nodes, , onNodesChange] = useNodesState(mockData.nodes);
-  const [edges, , onEdgesChange] = useEdgesState(mockData.edges);
+  /* ── Live data from API ── */
+  const { data: graphData, isLoading, error, isFetching } = useMemoryGraphData();
+
+  const transformed = useMemo(function xf() {
+    if (!graphData || graphData.memories.length === 0) return { nodes: [] as Node[], edges: [] as Edge[] };
+    return transformApiData(graphData);
+  }, [graphData]);
+
+  const [nodes, , onNodesChange] = useNodesState(transformed.nodes);
+  const [edges, , onEdgesChange] = useEdgesState(transformed.edges);
+
+  /* Sync nodes/edges when API data changes */
+  useEffect(function syncNodes() {
+    if (transformed.nodes.length > 0) {
+      onNodesChange(transformed.nodes.map(function m(n) { return { type: "reset" as const, item: n }; }));
+    }
+  }, [transformed.nodes]);
+
+  useEffect(function syncEdges() {
+    if (transformed.edges.length > 0) {
+      onEdgesChange(transformed.edges.map(function m(e) { return { type: "reset" as const, item: e }; }));
+    }
+  }, [transformed.edges]);
 
   /* ── Animated centering on selection ── */
   useEffect(function centerOnSelect() {
@@ -283,7 +444,6 @@ function InnerCanvas() {
 
   /* ── Displayed nodes (hover highlight + search filter) ── */
   const displayedNodes = useMemo(function dn() {
-    /* quick search takes priority */
     if (ctx.quickSearchOpen && ctx.quickSearchQuery.trim()) {
       const q = ctx.quickSearchQuery.trim().toLowerCase();
       return nodes.map(function m(n) {
@@ -294,7 +454,6 @@ function InnerCanvas() {
         return Object.assign({}, n, { style: s });
       });
     }
-    /* hover highlight */
     if (ctx.hoveredNodeId) {
       const conn = connectedIds(edges, ctx.hoveredNodeId);
       return nodes.map(function m(n) {
@@ -307,7 +466,7 @@ function InnerCanvas() {
     return nodes;
   }, [nodes, edges, ctx.hoveredNodeId, ctx.quickSearchOpen, ctx.quickSearchQuery]);
 
-  /* ── Displayed edges (zoom visibility + hover brighten + max 8) ── */
+  /* ── Displayed edges ── */
   const displayedEdges = useMemo(function de() {
     if (zoomLevel < 0.4) return [];
     var result = limitEdges(edges, 8);
@@ -384,14 +543,15 @@ function InnerCanvas() {
       var c = ctxRef.current;
       switch (e.key) {
         case "k":
-          if (e.metaKey || e.ctrlKey) { e.preventDefault(); c.setCmdPaletteOpen(!c.cmdPaletteOpen); }
+          if (e.metaKey || e.ctrlKey) { e.preventDefault(); c.setCmdPaletteOpen(true); }
           break;
         case "/":
           e.preventDefault();
-          c.setQuickSearchOpen(true);
+          c.setQuickSearchOpen(function t(p) { return !p; });
+          if (c.quickSearchOpen) c.setQuickSearchQuery("");
           break;
         case "f": case "F":
-          if (!e.metaKey && !e.ctrlKey) { e.preventDefault(); rf.fitView({ padding: 0.15, duration: 300 }); }
+          if (!e.metaKey && !e.ctrlKey) { e.preventDefault(); rf.fitView(fitViewOpts); }
           break;
         case "Escape":
           e.preventDefault();
@@ -423,7 +583,7 @@ function InnerCanvas() {
     return function cl() { window.removeEventListener("keydown", handler); };
   }, [rf, goCluster, shortcutsOpen]);
 
-  var isEmpty = nodes.length === 0;
+  var isEmpty = !isLoading && !error && nodes.length === 0;
 
   return (
     <div className="flex h-full w-full">
@@ -457,7 +617,14 @@ function InnerCanvas() {
           <Background variant={BackgroundVariant.Dots} gap={28} size={0.8} color="rgba(255,255,255,0.025)" />
           <GraphMinimap />
         </ReactFlow>
+        {isLoading && <LoadingState />}
+        {error && <ErrorToast message={error instanceof Error ? error.message : "Failed to load memory graph"} />}
         {isEmpty && <EmptyState />}
+        {isFetching && !isLoading && (
+          <div className="absolute top-4 right-4 z-50">
+            <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+          </div>
+        )}
         <ZoomControls />
         <ShortcutOverlay open={shortcutsOpen} onClose={function cl() { setShortcutsOpen(false); }} />
         {ctx.quickSearchOpen && <QuickSearchBar />}
@@ -468,6 +635,7 @@ function InnerCanvas() {
             nodes={memNodes}
             onSelectNode={ctx.setSelectedNodeId}
             onNavigateCluster={goCluster}
+            onRefresh={ctx.refreshGraph}
           />
         )}
       </div>

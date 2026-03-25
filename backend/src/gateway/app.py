@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from src.config.app_config import get_app_config
 from src.gateway.config import get_gateway_config
 from src.gateway.routers import (
+    memory_graph,
     agents,
     artifacts,
     channels,
@@ -158,6 +159,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)
+
+    # Memory Graph API is mounted at /api/memory/graph
+    app.include_router(memory_graph.router)
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
