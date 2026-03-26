@@ -39,18 +39,18 @@ const REGION_POSITIONS: Record<ClusterKey, { x: number; y: number }> = {
 };
 
 const TOPIC_OFFSETS = [
-  { x: 400, y: -70 },
-  { x: 430, y: 105 },
-  { x: 320, y: 265 },
-  { x: 110, y: 290 },
-  { x: -70, y: 170 },
+  { x: 480, y: -140 },
+  { x: 530, y: 120 },
+  { x: 420, y: 340 },
+  { x: 120, y: 380 },
+  { x: -100, y: 180 },
 ];
 
 const CLUSTER_OFFSETS = [
-  { x: 24, y: -178 },
-  { x: 208, y: -30 },
-  { x: 144, y: 162 },
-  { x: -52, y: 118 },
+  { x: 40, y: -240 },
+  { x: 280, y: -50 },
+  { x: 200, y: 210 },
+  { x: -80, y: 160 },
 ];
 
 function polarOffsets(count: number, radius: number) {
@@ -71,7 +71,6 @@ function buildGraph(
   selectedTopicId: string | null,
   selectedClusterId: string | null,
   selectedMemoryId: string | null,
-  hoveredNodeId: string | null,
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -99,7 +98,7 @@ function buildGraph(
         topicCount: region.topic_count,
         strongestLinks: region.strongest_links,
         focused: region.key === focusedRegion,
-        dimmed: Boolean(focusedRegion && region.key !== focusedRegion && !hoveredNodeId?.startsWith(`region-${region.key}`)),
+        dimmed: Boolean(focusedRegion && region.key !== focusedRegion),
       } satisfies RegionNodeData,
     });
   });
@@ -221,7 +220,7 @@ function buildGraph(
     .filter((item): item is MemoryEntry => Boolean(item))
     .slice(0, 12);
 
-  polarOffsets(memoryEntries.length, 120).forEach((offset, index) => {
+  polarOffsets(memoryEntries.length, 190).forEach((offset, index) => {
     const memory = memoryEntries[index]!;
     const id = memoryParticleNodeId(memory.id);
     nodes.push({
@@ -261,7 +260,6 @@ function MemoryGraphInner() {
   const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
   const [selectedClusterId, setSelectedClusterId] = useState<string | null>(null);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   const regions = useMemo(() => data?.regions ?? [], [data]);
   const topics = useMemo(() => data?.topics ?? [], [data]);
@@ -301,8 +299,8 @@ function MemoryGraphInner() {
     if (!data) {
       return { nodes: [], edges: [] };
     }
-    return buildGraph(data, focusedRegion, selectedTopic?.id ?? null, selectedCluster?.id ?? null, selectedMemory?.id ?? null, hoveredNodeId);
-  }, [data, focusedRegion, selectedCluster, selectedMemory, selectedTopic, hoveredNodeId]);
+    return buildGraph(data, focusedRegion, selectedTopic?.id ?? null, selectedCluster?.id ?? null, selectedMemory?.id ?? null);
+  }, [data, focusedRegion, selectedCluster, selectedMemory, selectedTopic]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -496,9 +494,9 @@ function MemoryGraphInner() {
         panOnDrag
         panOnScroll
         onNodeClick={onNodeClick}
-        onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
-        onNodeMouseLeave={() => setHoveredNodeId(null)}
-        onPaneClick={() => setHoveredNodeId(null)}
+        onPaneClick={() => {
+          /* no-op for now */
+        }}
         className="mg-reactflow"
       >
         <MiniMap

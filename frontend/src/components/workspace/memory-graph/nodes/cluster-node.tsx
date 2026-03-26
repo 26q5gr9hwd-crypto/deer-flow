@@ -1,5 +1,6 @@
 "use client";
 
+import { Handle, Position } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
 import React, { memo } from "react";
 
@@ -49,6 +50,8 @@ function ClusterNodeInner({ data, selected }: NodeProps) {
           ))}
         </div>
       ) : null}
+      <Handle type="target" position={Position.Left} className="mg-node-handle" />
+      <Handle type="source" position={Position.Right} className="mg-node-handle" />
     </div>
   );
 }
