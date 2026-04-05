@@ -6,12 +6,13 @@ per user turn and cached in thread state. Subsequent tool-loop re-entry reuses
 that exact compiled context instead of rebuilding memories / skills / prompt
 sections again.
 
-Design rules for STAB-2:
+Design rules for STAB-2 (updated by VESPER-45):
 - Stable system prompt per user turn
 - No full skill-body auto-injection
-- No always-visible capabilities directory in the default prompt
+- VESPER-45: Always-visible capabilities directory in the default prompt
+  (compact subagent + skill name/description directory, ~150-200 tokens)
 - Conversation window trimming may still change between loop turns
-- Skills remain available on demand through tools, not prompt furniture
+- Skills available on demand through load_skill tool
 """
 
 import hashlib

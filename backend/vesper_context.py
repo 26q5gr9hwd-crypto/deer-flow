@@ -1,17 +1,21 @@
 """VESPER Context Assembly Pipeline.
 
 Assembles structured context for each message:
-SOUL.md + datetime + Postgres projects/tasks + events + Hindsight memories (post-STAB runtime).
+SOUL.md + datetime + capabilities directory + Postgres projects/tasks + events + Hindsight memories (post-STAB runtime).
 Target: ~800-1,700 tokens total (down from ~6,500+).
+
+VESPER-45: Added always-visible capabilities directory section.
 """
 
 import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import psycopg2
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,62 @@ def _build_datetime_section(conn) -> str:
     except Exception as e:
         logger.warning(f"Failed to build datetime section: {e}")
         return f"[DATETIME] {now.strftime('%Y-%m-%d %H:%M UTC')}"
+
+
+def _build_capabilities_section() -> str:
+    """Build always-visible capabilities directory. ~150-200 tokens.
+
+    VESPER-45: Ensures GLM always knows what subagents and skills exist,
+    regardless of cosine similarity retrieval. Subagents are hardcoded
+    (don't change at runtime). Skills are scanned dynamically from
+    SKILL.md YAML frontmatter.
+    """
+    # Hardcoded subagents — these don't change at runtime
+    subagent_lines = [
+        "- bash: Shell commands, file writes, git, scripts",
+        "- web-researcher: Web search and research synthesis",
+        "- vesper-code-reader: Read-only codebase exploration",
+        "- vesper-code-writer: Draft code changes (no disk writes)",
+    ]
+
+    # Dynamic skills from SKILL.md frontmatter
+    skill_lines = []
+    skills_root = Path("/opt/deer-flow/skills/custom")
+    if skills_root.exists():
+        for skill_md in sorted(skills_root.rglob("SKILL.md")):
+            try:
+                content = skill_md.read_text()
+                if not content.startswith("---"):
+                    continue
+                _, frontmatter, _ = content.split("---", 2)
+                meta = yaml.safe_load(frontmatter)
+                name = meta.get("name")
+                desc = meta.get("description", "")
+                if name:
+                    # First sentence, capped at 80 chars for token budget
+                    short_desc = desc.split(". ")[0].strip()
+                    # Remove "Use when:" prefix if present
+                    if short_desc.startswith("Use when:"):
+                        short_desc = short_desc[len("Use when:"):].strip()
+                    if len(short_desc) > 80:
+                        short_desc = short_desc[:77] + "..."
+                    skill_lines.append(f"- {name}: {short_desc}")
+            except Exception:
+                continue
+
+    lines = [
+        "[CAPABILITIES]",
+        "Subagents (delegate via task_tool):",
+    ]
+    lines.extend(subagent_lines)
+    lines.append("")
+    lines.append("Skills (auto-loaded when relevant, or use load_skill tool):")
+    if skill_lines:
+        lines.extend(skill_lines)
+    else:
+        lines.append("- (no skills found)")
+
+    return "\n".join(lines)
 
 
 def _build_projects_section(conn) -> str | None:
@@ -199,6 +259,10 @@ def assemble_context_details(message: str, user_id: str = "daniel", skills_loade
         dt = _build_datetime_section(conn)
         sections.append(_make_section("datetime", "backend/vesper_context.py::_build_datetime_section", dt))
 
+        # VESPER-45: Always-visible capabilities directory
+        caps = _build_capabilities_section()
+        sections.append(_make_section("capabilities", "backend/vesper_context.py::_build_capabilities_section", caps))
+
         proj = _build_projects_section(conn)
         if proj:
             sections.append(_make_section("state", "Postgres: projects + tasks", proj))
@@ -212,6 +276,9 @@ def assemble_context_details(message: str, user_id: str = "daniel", skills_loade
         logger.error(f"Postgres connection failed: {e}")
         fallback_dt = f"[DATETIME] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         sections.append(_make_section("datetime", "backend/vesper_context.py::fallback", fallback_dt))
+        # Still add capabilities even if Postgres fails
+        caps = _build_capabilities_section()
+        sections.append(_make_section("capabilities", "backend/vesper_context.py::_build_capabilities_section", caps))
     finally:
         if conn:
             try:
