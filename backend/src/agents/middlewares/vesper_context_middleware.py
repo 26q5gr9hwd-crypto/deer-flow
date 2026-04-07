@@ -6,13 +6,12 @@ per user turn and cached in thread state. Subsequent tool-loop re-entry reuses
 that exact compiled context instead of rebuilding memories / skills / prompt
 sections again.
 
-Design rules for STAB-2 (updated by VESPER-45):
+Design rules for STAB-2 / STAB-10:
 - Stable system prompt per user turn
+- No default capability-directory prompt furniture
 - No full skill-body auto-injection
-- VESPER-45: Always-visible capabilities directory in the default prompt
-  (compact subagent + skill name/description directory, ~150-200 tokens)
 - Conversation window trimming may still change between loop turns
-- Skills available on demand through load_skill tool
+- Skills remain available on demand through load_skill
 """
 
 import hashlib
@@ -30,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_MSG_ID = "vesper-system-prompt"
 DEFAULT_CONTEXT_WINDOW = 10
+
+# ---------------------------------------------------------------------------
+# Middleware
+# ---------------------------------------------------------------------------
 
 
 class VesperContextMiddlewareState(AgentState):
@@ -74,7 +77,15 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
         signature = f"human:{human_count}:{msg_id}:{digest}"
         return signature, user_message
 
-    def _decorate_snapshot(self, snapshot: dict[str, Any], *, signature: str, reused: bool, window_size: int, visible_message_count: int) -> dict[str, Any]:
+    def _decorate_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        signature: str,
+        reused: bool,
+        window_size: int,
+        visible_message_count: int
+    ) -> dict[str, Any]:
         enriched = dict(snapshot)
         enriched["compiled_context_signature"] = signature
         enriched["compiled_context_reused"] = reused

@@ -1,7 +1,7 @@
 """Load Skill tool — returns full SKILL.md content for any named skill on demand.
 
-VESPER-45: Enables the brain to request detailed skill instructions when a skill is visible
-in the capabilities directory but was not auto-loaded by retrieval.
+The default compiled context stays thin, so detailed skill instructions are loaded
+explicitly on demand when needed.
 """
 
 import logging
@@ -23,7 +23,7 @@ def load_skill_tool(skill_name: str) -> str:
     already present in the current turn context.
 
     Args:
-        skill_name: The skill name exactly as shown in the capabilities directory
+        skill_name: The exact skill name to load
                     (e.g. 'subagent-delegation', 'memory-management', 'learn')
 
     Returns:
