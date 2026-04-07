@@ -31,5 +31,5 @@ Rules:
     tools=["bash", "ls", "read_file"],
     disallowed_tools=["task", "write_file", "str_replace", "ask_clarification", "present_files"],
     model="gpt-oss-120b",
-    max_turns=30,
+    max_turns=60,
 )

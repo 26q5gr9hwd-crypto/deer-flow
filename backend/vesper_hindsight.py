@@ -6,6 +6,28 @@ from typing import Any
 HINDSIGHT_BASE = "http://localhost:8888/v1/default"
 VESPER_BANK = "vesper"
 
+# Known stale operational facts that contradict the live runtime baseline.
+# We filter them at the adapter boundary until the bank has better first-class
+# archival/quarantine semantics for individual memories.
+_STALE_MEMORY_PATTERNS = (
+    "main backend port is 7788",
+    "main backend port for vesper is 7788",
+    "http://localhost:7788/",
+    "curl http://localhost:7788/",
+)
+
+
+def _is_stale_memory_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    haystacks = [
+        str(item.get("content") or ""),
+        str(item.get("text") or ""),
+        str(item.get("context") or ""),
+    ]
+    combined = " \n".join(haystacks).lower()
+    return any(pattern in combined for pattern in _STALE_MEMORY_PATTERNS)
+
 
 def _client():
     return httpx.AsyncClient(timeout=30.0)
@@ -41,7 +63,11 @@ def _normalize_results(response: Any) -> list[dict[str, Any]]:
         results = response.get("results", [])
     else:
         results = response
-    return results if isinstance(results, list) else []
+    if not isinstance(results, list):
+        return []
+
+    filtered = [item for item in results if not _is_stale_memory_item(item)]
+    return filtered
 
 
 def _format_results(results: list[dict[str, Any]]) -> str:
@@ -72,10 +98,14 @@ async def recall(query: str, limit: int = 10) -> dict[str, Any]:
         if len(trace_preview) > 500:
             trace_preview = trace_preview[:500] + "…"
 
+    raw_results = response.get("results", []) if isinstance(response, dict) else response
+    raw_result_count = len(raw_results) if isinstance(raw_results, list) else len(results)
+
     return {
         "query": query,
         "limit": limit,
         "result_count": len(results),
+        "filtered_count": max(raw_result_count - len(results), 0),
         "results": results,
         "content": _format_results(results),
         "trace_available": trace is not None,

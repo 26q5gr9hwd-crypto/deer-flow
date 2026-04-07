@@ -233,8 +233,9 @@ class SubagentExecutor:
             state = self._build_initial_state(task)
 
             # Build config with thread_id for sandbox access and recursion limit
+            graph_recursion_limit = max(self.config.max_turns * 4, self.config.max_turns + 20)
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                "recursion_limit": graph_recursion_limit,
             }
             context = {}
             if self.thread_id:
