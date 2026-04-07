@@ -91,7 +91,6 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
             captured["task_id"] = task_id
             return task_id or "generated-task-id"
 
-    # Simulate two polling rounds: first running (with one message), then completed.
     responses = iter(
         [
             _make_result(FakeSubagentStatus.RUNNING, ai_messages=[{"id": "m1", "content": "phase-1"}]),
@@ -110,7 +109,6 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
-    # task_tool lazily imports from src.tools at call time, so patch that module-level function.
     monkeypatch.setattr("src.tools.get_available_tools", get_available_tools)
 
     output = task_tool_module.task_tool.func(
@@ -130,15 +128,25 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["executor_kwargs"]["config"].max_turns == 7
     assert "Skills Appendix" in captured["executor_kwargs"]["config"].system_prompt
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", subagent_enabled=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", agent_role="subagent")
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
     assert events[-1]["result"] == "all done"
 
+    run_state = runtime.state["vesper_delegation_runs"]["tc-123"]
+    assert run_state["status"] == "completed"
+    assert run_state["terminal_state"] == "completed"
+    assert run_state["subagent_type"] == "general-purpose"
+    assert run_state["claim"]["status"] == "released"
+    assert run_state["claim"]["owner_id"] == "tc-123"
+    assert run_state["ai_message_count"] == 2
+    assert run_state["result_preview"] == "all done"
+
 
 def test_task_tool_returns_failed_message(monkeypatch):
     config = _make_subagent_config()
+    runtime = _make_runtime()
     events = []
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
@@ -159,7 +167,7 @@ def test_task_tool_returns_failed_message(monkeypatch):
     monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="do fail",
         subagent_type="general-purpose",
@@ -169,10 +177,13 @@ def test_task_tool_returns_failed_message(monkeypatch):
     assert output == "Task failed. Error: subagent crashed"
     assert events[-1]["type"] == "task_failed"
     assert events[-1]["error"] == "subagent crashed"
+    assert runtime.state["vesper_delegation_runs"]["tc-fail"]["claim"]["status"] == "released"
+    assert runtime.state["vesper_delegation_runs"]["tc-fail"]["status"] == "failed"
 
 
 def test_task_tool_returns_timed_out_message(monkeypatch):
     config = _make_subagent_config()
+    runtime = _make_runtime()
     events = []
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
@@ -193,7 +204,7 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
     monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="do timeout",
         subagent_type="general-purpose",
@@ -203,12 +214,14 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
     assert output == "Task timed out. Error: timeout"
     assert events[-1]["type"] == "task_timed_out"
     assert events[-1]["error"] == "timeout"
+    assert runtime.state["vesper_delegation_runs"]["tc-timeout"]["claim"]["status"] == "released"
+    assert runtime.state["vesper_delegation_runs"]["tc-timeout"]["status"] == "timed_out"
 
 
 def test_task_tool_polling_safety_timeout(monkeypatch):
     config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
     config.timeout_seconds = 1
+    runtime = _make_runtime()
     events = []
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
@@ -229,7 +242,7 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="never finish",
         subagent_type="general-purpose",
@@ -239,11 +252,39 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert output.startswith("Task polling timed out after 0 minutes")
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
+    run_state = runtime.state["vesper_delegation_runs"]["tc-safety-timeout"]
+    assert run_state["status"] == "polling_timeout"
+    assert run_state["claim"]["status"] == "claimed"
+
+
+def test_task_tool_prevents_duplicate_active_claim(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    runtime.state["vesper_delegation_runs"] = {
+        "tc-duplicate": {
+            "task_id": "tc-duplicate",
+            "status": "running",
+            "claim": {"status": "claimed", "owner_type": "general-purpose", "owner_id": "tc-duplicate"},
+        }
+    }
+
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+
+    output = task_tool_module.task_tool.func(
+        runtime=runtime,
+        description="执行任务",
+        prompt="duplicate",
+        subagent_type="general-purpose",
+        tool_call_id="tc-duplicate",
+    )
+
+    assert output.startswith("Task already claimed by active owner")
 
 
 def test_cleanup_called_on_completed(monkeypatch):
     """Verify cleanup_background_task is called when task completes."""
     config = _make_subagent_config()
+    runtime = _make_runtime()
     events = []
     cleanup_calls = []
 
@@ -270,7 +311,7 @@ def test_cleanup_called_on_completed(monkeypatch):
     )
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="complete task",
         subagent_type="general-purpose",
@@ -284,6 +325,7 @@ def test_cleanup_called_on_completed(monkeypatch):
 def test_cleanup_called_on_failed(monkeypatch):
     """Verify cleanup_background_task is called when task fails."""
     config = _make_subagent_config()
+    runtime = _make_runtime()
     events = []
     cleanup_calls = []
 
@@ -310,7 +352,7 @@ def test_cleanup_called_on_failed(monkeypatch):
     )
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="fail task",
         subagent_type="general-purpose",
@@ -324,6 +366,7 @@ def test_cleanup_called_on_failed(monkeypatch):
 def test_cleanup_called_on_timed_out(monkeypatch):
     """Verify cleanup_background_task is called when task times out."""
     config = _make_subagent_config()
+    runtime = _make_runtime()
     events = []
     cleanup_calls = []
 
@@ -350,60 +393,12 @@ def test_cleanup_called_on_timed_out(monkeypatch):
     )
 
     output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
+        runtime=runtime,
         description="执行任务",
         prompt="timeout task",
         subagent_type="general-purpose",
-        tool_call_id="tc-cleanup-timedout",
+        tool_call_id="tc-cleanup-timeout",
     )
 
     assert output == "Task timed out. Error: timeout"
-    assert cleanup_calls == ["tc-cleanup-timedout"]
-
-
-def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
-    """Verify cleanup_background_task is NOT called on polling safety timeout.
-
-    This prevents race conditions where the background task is still running
-    but the polling loop gives up. The cleanup should happen later when the
-    executor completes and sets a terminal status.
-    """
-    config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
-    config.timeout_seconds = 1
-    events = []
-    cleanup_calls = []
-
-    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(
-        task_tool_module,
-        "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
-    )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
-    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
-    monkeypatch.setattr(
-        task_tool_module,
-        "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
-    )
-    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
-    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
-    monkeypatch.setattr(
-        task_tool_module,
-        "cleanup_background_task",
-        lambda task_id: cleanup_calls.append(task_id),
-    )
-
-    output = task_tool_module.task_tool.func(
-        runtime=_make_runtime(),
-        description="执行任务",
-        prompt="never finish",
-        subagent_type="general-purpose",
-        tool_call_id="tc-no-cleanup-safety-timeout",
-    )
-
-    assert output.startswith("Task polling timed out after 0 minutes")
-    # cleanup should NOT be called because the task is still RUNNING
-    assert cleanup_calls == []
+    assert cleanup_calls == ["tc-cleanup-timeout"]

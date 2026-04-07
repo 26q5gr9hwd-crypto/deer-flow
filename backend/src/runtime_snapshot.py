@@ -256,6 +256,7 @@ def build_runtime_snapshot(
         "subagents": subagents,
         "skills": skills,
         "memory": memory,
+        "delegation": {"runs": [], "active_claims": [], "source": "thread_state.vesper_delegation_runs"},
         "source_of_truth": source_paths,
         "provenance": {
             "snapshot_source": snapshot_source,

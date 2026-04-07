@@ -88,6 +88,7 @@ Async task delegation with concurrent execution:
 - **Concurrency**: Max 3 subagents per turn, 15-minute timeout
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
+- **Durable delegation ledger**: `ThreadState.vesper_delegation_runs` persists owner claim, lineage, progress preview, and terminal result summary for each delegated run
 
 ### Memory System
 
@@ -204,7 +205,7 @@ backend/
 │   │   ├── lead_agent/         # Main agent (factory, prompts)
 │   │   ├── middlewares/        # 9 middleware components
 │   │   ├── memory/             # Memory extraction & storage
-│   │   └── thread_state.py    # ThreadState schema
+│   │   └── thread_state.py    # ThreadState schema + durable delegation ledger
 │   ├── gateway/                # FastAPI Gateway API
 │   │   ├── app.py             # Application setup
 │   │   └── routers/           # 6 route modules

@@ -268,6 +268,37 @@ def _build_retain_events(thread_id: str, run_id: str | None, limit: int = 10) ->
     return matches[-limit:]
 
 
+def _normalize_delegation_runs(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _build_delegation_summary(runs: dict[str, Any]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    active_claims: list[dict[str, Any]] = []
+    for task_id, payload in runs.items():
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get("status") or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+        claim = payload.get("claim")
+        if isinstance(claim, dict) and claim.get("status") == "claimed":
+            active_claims.append(
+                {
+                    "task_id": task_id,
+                    "owner_type": claim.get("owner_type"),
+                    "owner_id": claim.get("owner_id"),
+                    "claimed_at": claim.get("claimed_at"),
+                    "description": payload.get("description"),
+                    "subagent_type": payload.get("subagent_type"),
+                }
+            )
+    return {
+        "total_runs": len(runs),
+        "status_counts": counts,
+        "active_claims": active_claims,
+    }
+
+
 def _snapshot_fidelity(checkpoint: dict[str, Any]) -> str:
     versions = _checkpoint_channel_versions(checkpoint)
     values = _checkpoint_channel_values(checkpoint)
@@ -605,6 +636,13 @@ def _build_selected_payload(thread_id: str, row: dict[str, Any], run_history: li
     run_snapshot.setdefault("context_snapshot", context_snapshot or {})
     run_snapshot.setdefault("memory", build_memory_snapshot(context_snapshot or {}))
     run_snapshot["memory"]["retain_events"] = _build_retain_events(thread_id, run_id)
+    delegation_runs = _normalize_delegation_runs(_load_channel_value(thread_id, checkpoint, "vesper_delegation_runs"))
+    delegation_summary = _build_delegation_summary(delegation_runs)
+    run_snapshot["delegation"] = {
+        "runs": delegation_runs,
+        "active_claims": delegation_summary.get("active_claims", []),
+        "source": "thread_state.vesper_delegation_runs",
+    }
     lead_snapshot = _ensure_lead_snapshot_fields(run_snapshot, agent_name, model_name)
 
     warnings: list[str] = []
@@ -667,6 +705,8 @@ def _build_selected_payload(thread_id: str, row: dict[str, Any], run_history: li
         "subagents": run_snapshot.get("subagents", []),
         "skills": run_snapshot.get("skills", {}),
         "memory": run_snapshot.get("memory", {}),
+        "delegation": run_snapshot.get("delegation", {}),
+        "delegation_summary": delegation_summary,
         "timeline": timeline,
         "timeline_scope": "selected_run",
         "selected_run_message_count": len(run_messages),
