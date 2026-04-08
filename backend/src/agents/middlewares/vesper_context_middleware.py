@@ -6,20 +6,23 @@ per user turn and cached in thread state. Subsequent tool-loop re-entry reuses
 that exact compiled context instead of rebuilding memories / skills / prompt
 sections again.
 
-Design rules for STAB-2 / STAB-10:
+Design rules for STAB-2 / STAB-10 / STAB-24:
 - Stable system prompt per user turn
 - No default capability-directory prompt furniture
 - No full skill-body auto-injection
 - Conversation window trimming may still change between loop turns
 - Skills remain available on demand through load_skill
+- Provider-facing requests must be trimmed explicitly at model-call time
 """
 
 import hashlib
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
 
 from src.runtime_snapshot import build_runtime_snapshot
@@ -29,10 +32,6 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_MSG_ID = "vesper-system-prompt"
 DEFAULT_CONTEXT_WINDOW = 10
-
-# ---------------------------------------------------------------------------
-# Middleware
-# ---------------------------------------------------------------------------
 
 
 class VesperContextMiddlewareState(AgentState):
@@ -84,7 +83,7 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
         signature: str,
         reused: bool,
         window_size: int,
-        visible_message_count: int
+        visible_message_count: int,
     ) -> dict[str, Any]:
         enriched = dict(snapshot)
         enriched["compiled_context_signature"] = signature
@@ -94,9 +93,7 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
         enriched["visible_message_count"] = visible_message_count
         return enriched
 
-    @override
-    def before_model(self, state, runtime):
-        messages = state.get("messages", [])
+    def _prepare_context_payload(self, state, runtime, messages) -> dict[str, Any]:
         window_size = self._resolve_window_size(state)
         signature, user_message = self._latest_human_signature(messages)
 
@@ -119,15 +116,14 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             context = cached_context
 
         non_system = [msg for msg in messages if getattr(msg, "type", None) != "system"]
-        if len(non_system) > window_size:
-            non_system = non_system[-window_size:]
+        visible_messages = non_system[-window_size:] if len(non_system) > window_size else list(non_system)
 
         snapshot = self._decorate_snapshot(
             snapshot,
             signature=signature,
             reused=not rebuilt,
             window_size=window_size,
-            visible_message_count=len(non_system),
+            visible_message_count=len(visible_messages),
         )
 
         config = getattr(runtime, "config", {}) or {}
@@ -144,30 +140,86 @@ class VesperContextMiddleware(AgentMiddleware[VesperContextMiddlewareState]):
             context_signature=signature,
             context_reused=not rebuilt,
             thread_id=thread_id,
-            visible_message_count=len(non_system),
+            visible_message_count=len(visible_messages),
             context_window_size=window_size,
             snapshot_source="before_model",
         )
 
-        sys_msg = SystemMessage(content=context, id=_SYSTEM_MSG_ID)
+        return {
+            "signature": signature,
+            "context": context,
+            "snapshot": snapshot,
+            "run_snapshot": run_snapshot,
+            "visible_messages": visible_messages,
+            "window_size": window_size,
+            "rebuilt": rebuilt,
+        }
 
-        ctx_tokens = len(context) // 4
-        conv_tokens = sum(len(str(getattr(msg, "content", ""))) // 4 for msg in non_system)
+    def _build_request_override(self, request: ModelRequest) -> tuple[ModelRequest, int, int]:
+        state = request.state or {}
+        context = state.get("vesper_compiled_context")
+        if not isinstance(context, str) or not context.strip():
+            payload = self._prepare_context_payload(state, request.runtime, request.messages)
+            context = payload["context"]
+
+        non_system = [msg for msg in request.messages if getattr(msg, "type", None) != "system"]
+        full_count = len(non_system)
+        window_size = self._resolve_window_size(state)
+        visible_messages = non_system[-window_size:] if len(non_system) > window_size else list(non_system)
+        overridden = request.override(
+            system_message=SystemMessage(content=context, id=_SYSTEM_MSG_ID),
+            messages=visible_messages,
+        )
+        return overridden, full_count, len(visible_messages)
+
+    @override
+    def before_model(self, state, runtime):
+        messages = state.get("messages", [])
+        payload = self._prepare_context_payload(state, runtime, messages)
+
+        ctx_tokens = len(payload["context"]) // 4
+        conv_tokens = sum(len(str(getattr(msg, "content", ""))) // 4 for msg in payload["visible_messages"])
         logger.info(
             "VESPER-STAB-2 context_%s sig=%s system=%d conv=%d msgs=%d/%d",
-            "built" if rebuilt else "reused",
-            signature,
+            "built" if payload["rebuilt"] else "reused",
+            payload["signature"],
             ctx_tokens,
             conv_tokens,
-            len(non_system),
-            window_size,
+            len(payload["visible_messages"]),
+            payload["window_size"],
         )
 
-        update = {
-            "messages": [sys_msg] + non_system,
-            "vesper_context_signature": signature,
-            "vesper_compiled_context": context,
-            "vesper_context_snapshot": snapshot,
-            "vesper_run_snapshot": run_snapshot,
+        return {
+            "vesper_context_signature": payload["signature"],
+            "vesper_compiled_context": payload["context"],
+            "vesper_context_snapshot": payload["snapshot"],
+            "vesper_run_snapshot": payload["run_snapshot"],
         }
-        return update
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        overridden, full_count, visible_count = self._build_request_override(request)
+        logger.info(
+            "VESPER-STAB-24 request_trimmed full_non_system=%d visible_non_system=%d",
+            full_count,
+            visible_count,
+        )
+        return handler(overridden)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        overridden, full_count, visible_count = self._build_request_override(request)
+        logger.info(
+            "VESPER-STAB-24 request_trimmed full_non_system=%d visible_non_system=%d",
+            full_count,
+            visible_count,
+        )
+        return await handler(overridden)
