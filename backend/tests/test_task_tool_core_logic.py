@@ -5,6 +5,8 @@ from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from langgraph.types import Command
+
 from src.subagents.config import SubagentConfig
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -120,7 +122,8 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         max_turns=7,
     )
 
-    assert output == "Task Succeeded. Result: all done"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task Succeeded. Result: all done"
     assert captured["prompt"] == "collect diagnostics"
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
@@ -174,7 +177,8 @@ def test_task_tool_returns_failed_message(monkeypatch):
         tool_call_id="tc-fail",
     )
 
-    assert output == "Task failed. Error: subagent crashed"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task failed. Error: subagent crashed"
     assert events[-1]["type"] == "task_failed"
     assert events[-1]["error"] == "subagent crashed"
     assert runtime.state["vesper_delegation_runs"]["tc-fail"]["claim"]["status"] == "released"
@@ -211,7 +215,8 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
         tool_call_id="tc-timeout",
     )
 
-    assert output == "Task timed out. Error: timeout"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task timed out. Error: timeout"
     assert events[-1]["type"] == "task_timed_out"
     assert events[-1]["error"] == "timeout"
     assert runtime.state["vesper_delegation_runs"]["tc-timeout"]["claim"]["status"] == "released"
@@ -249,7 +254,8 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
         tool_call_id="tc-safety-timeout",
     )
 
-    assert output.startswith("Task polling timed out after 0 minutes")
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content.startswith("Task polling timed out after 0 minutes")
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
     run_state = runtime.state["vesper_delegation_runs"]["tc-safety-timeout"]
@@ -318,7 +324,8 @@ def test_cleanup_called_on_completed(monkeypatch):
         tool_call_id="tc-cleanup-completed",
     )
 
-    assert output == "Task Succeeded. Result: done"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task Succeeded. Result: done"
     assert cleanup_calls == ["tc-cleanup-completed"]
 
 
@@ -359,7 +366,8 @@ def test_cleanup_called_on_failed(monkeypatch):
         tool_call_id="tc-cleanup-failed",
     )
 
-    assert output == "Task failed. Error: error"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task failed. Error: error"
     assert cleanup_calls == ["tc-cleanup-failed"]
 
 
@@ -400,5 +408,61 @@ def test_cleanup_called_on_timed_out(monkeypatch):
         tool_call_id="tc-cleanup-timeout",
     )
 
-    assert output == "Task timed out. Error: timeout"
+    assert isinstance(output, Command)
+    assert output.update["messages"][0].content == "Task timed out. Error: timeout"
     assert cleanup_calls == ["tc-cleanup-timeout"]
+
+
+def test_task_tool_records_provider_calls(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+
+    ai_messages = [
+        {
+            "id": "m1",
+            "content": "worker step 1",
+            "response_metadata": {
+                "model_name": "openrouter/test-worker",
+                "token_usage": {"prompt_tokens": 2700, "completion_tokens": 120, "total_tokens": 2820},
+            },
+        },
+        {
+            "id": "m2",
+            "content": "worker step 2",
+            "response_metadata": {
+                "model_name": "openrouter/test-worker",
+                "token_usage": {"prompt_tokens": 2800, "completion_tokens": 110, "total_tokens": 2910},
+            },
+        },
+    ]
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, ai_messages=ai_messages, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+
+    output = task_tool_module.task_tool.func(
+        runtime=runtime,
+        description="执行任务",
+        prompt="inspect worker",
+        subagent_type="general-purpose",
+        tool_call_id="tc-provider",
+    )
+
+    assert isinstance(output, Command)
+    run_state = output.update["vesper_delegation_runs"]["tc-provider"]
+    assert [call["prompt_tokens"] for call in run_state["provider_calls"]] == [2700, 2800]
+    assert run_state["provider_calls"][0]["model_name"] == "openrouter/test-worker"

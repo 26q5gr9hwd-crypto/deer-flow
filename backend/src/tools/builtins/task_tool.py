@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
+from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from src.agents.lead_agent.prompt import get_skills_prompt_section
@@ -31,6 +33,82 @@ def _preview_text(value: Any, limit: int = 500) -> str | None:
     if not compact:
         return None
     return compact if len(compact) <= limit else compact[:limit] + "…"
+
+
+def _message_dict_content(message: dict[str, Any]) -> Any:
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return content
+
+
+def _summarize_provider_call(message: dict[str, Any], sequence: int) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+    response_metadata = message.get("response_metadata") if isinstance(message.get("response_metadata"), dict) else {}
+    usage = response_metadata.get("token_usage") if isinstance(response_metadata.get("token_usage"), dict) else {}
+    usage_metadata = message.get("usage_metadata") if isinstance(message.get("usage_metadata"), dict) else {}
+
+    prompt_tokens = usage.get("prompt_tokens")
+    if not isinstance(prompt_tokens, int):
+        prompt_tokens = usage_metadata.get("input_tokens") if isinstance(usage_metadata.get("input_tokens"), int) else None
+
+    completion_tokens = usage.get("completion_tokens")
+    if not isinstance(completion_tokens, int):
+        completion_tokens = usage_metadata.get("output_tokens") if isinstance(usage_metadata.get("output_tokens"), int) else None
+
+    total_tokens = usage.get("total_tokens")
+    if not isinstance(total_tokens, int):
+        total_tokens = usage_metadata.get("total_tokens") if isinstance(usage_metadata.get("total_tokens"), int) else None
+
+    model_name = response_metadata.get("model_name") or response_metadata.get("model") or message.get("name")
+    tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+
+    return {
+        "sequence": sequence,
+        "message_id": message.get("id"),
+        "model_name": model_name,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost": usage.get("cost"),
+        "tool_call_count": len(tool_calls),
+        "preview": _preview_text(_message_dict_content(message)),
+        "evidence": "worker_ai_message",
+    }
+
+
+def _collect_provider_calls(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    provider_calls: list[dict[str, Any]] = []
+    seen_message_ids: set[str] = set()
+    for index, message in enumerate(messages or [], start=1):
+        summary = _summarize_provider_call(message, index)
+        if summary is None:
+            continue
+        message_id = summary.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+        provider_calls.append(summary)
+    return provider_calls
+
+
+def _build_task_command(
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+    *,
+    tool_call_id: str,
+    task_id: str,
+    content: str,
+) -> Command:
+    update: dict[str, Any] = {
+        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
+    }
+    runs = _ensure_delegation_runs(runtime)
+    payload = runs.get(task_id) if isinstance(runs.get(task_id), dict) else None
+    if payload is not None:
+        update["vesper_delegation_runs"] = {task_id: payload}
+    return Command(update=update)
 
 
 def _ensure_delegation_runs(runtime: ToolRuntime[ContextT, ThreadState] | None) -> dict[str, dict[str, Any]]:
@@ -105,18 +183,23 @@ def _record_started(
                 "parent_tool_call_id": task_id,
                 "trace_id": trace_id,
             },
+            "provider_calls": [],
         },
     )
 
 
 def _record_progress(runtime: ToolRuntime[ContextT, ThreadState] | None, *, task_id: str, message: dict[str, Any], total_messages: int) -> None:
+    runs = _ensure_delegation_runs(runtime)
+    prior = runs.get(task_id, {}) if isinstance(runs.get(task_id), dict) else {}
+    provider_calls = _collect_provider_calls((prior.get("provider_calls") or []) + [message])
     _upsert_delegation_run(
         runtime,
         task_id,
         {
             "status": "running",
             "ai_message_count": total_messages,
-            "latest_message_preview": _preview_text(message.get("content") or message),
+            "latest_message_preview": _preview_text(_message_dict_content(message) or message),
+            "provider_calls": provider_calls,
             "updated_at": _now_iso(),
         },
     )
@@ -130,6 +213,7 @@ def _record_terminal(
     result_text: str | None = None,
     error_text: str | None = None,
     ai_message_count: int | None = None,
+    ai_messages: list[dict[str, Any]] | None = None,
     release_claim: bool = True,
 ) -> None:
     now = _now_iso()
@@ -144,6 +228,8 @@ def _record_terminal(
     }
     if ai_message_count is not None:
         update["ai_message_count"] = ai_message_count
+    if ai_messages is not None:
+        update["provider_calls"] = _collect_provider_calls(ai_messages)
     if release_claim:
         prior = _ensure_delegation_runs(runtime).get(task_id, {})
         prior_claim = prior.get("claim") if isinstance(prior, dict) else None
@@ -294,7 +380,7 @@ def task_tool(
             writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
             _record_terminal(runtime, task_id=task_id, status="failed", error_text="Task disappeared from background tasks")
             cleanup_background_task(task_id)
-            return f"Error: Task {task_id} disappeared from background tasks"
+            return _build_task_command(runtime, tool_call_id=tool_call_id, task_id=task_id, content=f"Error: Task {task_id} disappeared from background tasks")
 
         # Log status changes for debugging
         if result.status != last_status:
@@ -330,9 +416,10 @@ def task_tool(
                 status="completed",
                 result_text=result.result,
                 ai_message_count=current_message_count,
+                ai_messages=result.ai_messages,
             )
             cleanup_background_task(task_id)
-            return f"Task Succeeded. Result: {result.result}"
+            return _build_task_command(runtime, tool_call_id=tool_call_id, task_id=task_id, content=f"Task Succeeded. Result: {result.result}")
         elif result.status == SubagentStatus.FAILED:
             writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
@@ -342,9 +429,10 @@ def task_tool(
                 status="failed",
                 error_text=result.error,
                 ai_message_count=current_message_count,
+                ai_messages=result.ai_messages,
             )
             cleanup_background_task(task_id)
-            return f"Task failed. Error: {result.error}"
+            return _build_task_command(runtime, tool_call_id=tool_call_id, task_id=task_id, content=f"Task failed. Error: {result.error}")
         elif result.status == SubagentStatus.TIMED_OUT:
             writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
             logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
@@ -354,9 +442,10 @@ def task_tool(
                 status="timed_out",
                 error_text=result.error,
                 ai_message_count=current_message_count,
+                ai_messages=result.ai_messages,
             )
             cleanup_background_task(task_id)
-            return f"Task timed out. Error: {result.error}"
+            return _build_task_command(runtime, tool_call_id=tool_call_id, task_id=task_id, content=f"Task timed out. Error: {result.error}")
 
         # Still running, wait before next poll
         time.sleep(5)  # Poll every 5 seconds
@@ -381,4 +470,4 @@ def task_tool(
                     "error": "Polling timed out before a terminal subagent result was observed",
                 },
             )
-            return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+            return _build_task_command(runtime, tool_call_id=tool_call_id, task_id=task_id, content=f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}")

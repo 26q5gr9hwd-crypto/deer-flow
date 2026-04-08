@@ -45,6 +45,7 @@ class DelegationRunState(TypedDict, total=False):
     updated_at: str
     completed_at: str | None
     lineage: dict[str, Any]
+    provider_calls: list[dict[str, Any]]
 
 
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:

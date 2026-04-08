@@ -275,11 +275,15 @@ def _normalize_delegation_runs(value: Any) -> dict[str, Any]:
 def _build_delegation_summary(runs: dict[str, Any]) -> dict[str, Any]:
     counts: dict[str, int] = {}
     active_claims: list[dict[str, Any]] = []
+    total_provider_calls = 0
     for task_id, payload in runs.items():
         if not isinstance(payload, dict):
             continue
         status = payload.get("status") or "unknown"
         counts[status] = counts.get(status, 0) + 1
+        provider_calls = payload.get("provider_calls")
+        if isinstance(provider_calls, list):
+            total_provider_calls += len(provider_calls)
         claim = payload.get("claim")
         if isinstance(claim, dict) and claim.get("status") == "claimed":
             active_claims.append(
@@ -296,7 +300,100 @@ def _build_delegation_summary(runs: dict[str, Any]) -> dict[str, Any]:
         "total_runs": len(runs),
         "status_counts": counts,
         "active_claims": active_claims,
+        "provider_call_count": total_provider_calls,
     }
+
+
+def _build_delegated_provider_timeline(timeline: list[dict[str, Any]], delegation_runs: dict[str, Any]) -> list[dict[str, Any]]:
+    runs_by_parent: dict[str, dict[str, Any]] = {}
+    for task_id, payload in delegation_runs.items():
+        if not isinstance(payload, dict):
+            continue
+        lineage = payload.get("lineage") if isinstance(payload.get("lineage"), dict) else {}
+        parent_tool_call_id = lineage.get("parent_tool_call_id") or task_id
+        runs_by_parent[parent_tool_call_id] = payload
+
+    enriched: list[dict[str, Any]] = []
+    for event in timeline:
+        enriched.append(event)
+        if event.get("type") != "delegation_started":
+            continue
+        task_id = event.get("tool_call_id")
+        payload = runs_by_parent.get(task_id)
+        if not isinstance(payload, dict):
+            continue
+        for call in payload.get("provider_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            enriched.append(
+                {
+                    "index": event.get("index"),
+                    "type": "delegated_llm_call_completed",
+                    "tool_call_id": task_id,
+                    "task_id": task_id,
+                    "subagent_type": payload.get("subagent_type"),
+                    "trace_id": payload.get("trace_id"),
+                    "message_id": call.get("message_id"),
+                    "sequence_within_task": call.get("sequence"),
+                    "prompt_tokens": call.get("prompt_tokens"),
+                    "completion_tokens": call.get("completion_tokens"),
+                    "total_tokens": call.get("total_tokens"),
+                    "cost": call.get("cost"),
+                    "tool_call_count": call.get("tool_call_count"),
+                    "preview": call.get("preview") or "",
+                    "evidence": call.get("evidence") or "worker_ai_message",
+                    "owner_scope": "delegated_subagent",
+                    "owner_id": task_id,
+                    "description": payload.get("description"),
+                    "model_name": call.get("model_name"),
+                }
+            )
+    return enriched
+
+
+def _build_provider_call_mapping(timeline: list[dict[str, Any]], *, run_id: str | None, thread_id: str, agent_name: str) -> list[dict[str, Any]]:
+    mapping: list[dict[str, Any]] = []
+    for event in timeline:
+        event_type = event.get("type")
+        if event_type == "llm_call_completed":
+            mapping.append(
+                {
+                    "owner_scope": "lead",
+                    "owner_id": run_id or agent_name,
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "prompt_tokens": event.get("prompt_tokens"),
+                    "completion_tokens": event.get("completion_tokens"),
+                    "total_tokens": event.get("total_tokens"),
+                    "tool_call_count": event.get("tool_call_count"),
+                    "preview": event.get("preview"),
+                    "evidence": event.get("evidence"),
+                    "timeline_type": event_type,
+                }
+            )
+        elif event_type == "delegated_llm_call_completed":
+            mapping.append(
+                {
+                    "owner_scope": "delegated_subagent",
+                    "owner_id": event.get("owner_id"),
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "task_id": event.get("task_id"),
+                    "subagent_type": event.get("subagent_type"),
+                    "trace_id": event.get("trace_id"),
+                    "prompt_tokens": event.get("prompt_tokens"),
+                    "completion_tokens": event.get("completion_tokens"),
+                    "total_tokens": event.get("total_tokens"),
+                    "tool_call_count": event.get("tool_call_count"),
+                    "preview": event.get("preview"),
+                    "evidence": event.get("evidence"),
+                    "timeline_type": event_type,
+                    "model_name": event.get("model_name"),
+                }
+            )
+    for sequence, item in enumerate(mapping, start=1):
+        item["sequence"] = sequence
+    return mapping
 
 
 def _snapshot_fidelity(checkpoint: dict[str, Any]) -> str:
@@ -669,6 +766,7 @@ def _build_selected_payload(thread_id: str, row: dict[str, Any], run_history: li
         }
 
     timeline = _build_timeline(run_messages)
+    timeline = _build_delegated_provider_timeline(timeline, delegation_runs)
     injected_events: list[dict[str, Any]] = []
     context_event = _build_context_event(context_snapshot or {}, snapshot_mode)
     if context_event:
@@ -687,6 +785,12 @@ def _build_selected_payload(thread_id: str, row: dict[str, Any], run_history: li
     )
 
     token_accounting = _build_token_accounting(context_snapshot or {}, run_messages, lead_snapshot)
+    provider_call_mapping = _build_provider_call_mapping(
+        timeline,
+        run_id=run_id,
+        thread_id=thread_id,
+        agent_name=agent_name,
+    )
 
     return {
         "thread_id": thread_id,
@@ -707,6 +811,7 @@ def _build_selected_payload(thread_id: str, row: dict[str, Any], run_history: li
         "memory": run_snapshot.get("memory", {}),
         "delegation": run_snapshot.get("delegation", {}),
         "delegation_summary": delegation_summary,
+        "provider_call_mapping": provider_call_mapping,
         "timeline": timeline,
         "timeline_scope": "selected_run",
         "selected_run_message_count": len(run_messages),
