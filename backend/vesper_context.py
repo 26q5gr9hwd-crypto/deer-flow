@@ -15,6 +15,8 @@ from typing import Any
 
 import psycopg2
 
+from src.config.memory_config import get_memory_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -165,6 +167,87 @@ def _update_last_interaction(conn):
         logger.warning(f"Failed to update last interaction: {e}")
 
 
+SIMPLE_TURN_MEMORY_BUDGET_TOKENS = 600
+_SIMPLE_TURN_MAX_WORDS = 6
+_SIMPLE_TURN_MAX_CHARS = 48
+_COMPLEXITY_MARKERS = (
+    "?",
+    "\n",
+    "/",
+    "\\",
+    "http",
+    "error",
+    "bug",
+    "fix",
+    "deploy",
+    "code",
+    "stack",
+    "trace",
+    "memory",
+    "project",
+    "task",
+    "why",
+    "how",
+    "what",
+    "when",
+)
+
+
+def _approx_tokens(text: str) -> int:
+    return len(text) // 4 if text else 0
+
+
+def _is_simple_turn(message: str) -> bool:
+    normalized = " ".join((message or "").split())
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    word_count = len(normalized.split())
+    if word_count > _SIMPLE_TURN_MAX_WORDS or len(normalized) > _SIMPLE_TURN_MAX_CHARS:
+        return False
+    return not any(marker in lowered for marker in _COMPLEXITY_MARKERS)
+
+
+def _truncate_memory_content(content: str, max_tokens: int) -> tuple[str, int, bool]:
+    original_tokens = _approx_tokens(content)
+    if max_tokens <= 0:
+        return "", original_tokens, bool(content.strip())
+    if original_tokens <= max_tokens:
+        return content, original_tokens, False
+
+    separator = "\n---\n"
+    chunks = [chunk.strip() for chunk in content.split(separator) if chunk.strip()]
+    kept: list[str] = []
+    remaining = max_tokens
+
+    for chunk in chunks:
+        chunk_tokens = max(1, _approx_tokens(chunk))
+        if chunk_tokens <= remaining:
+            kept.append(chunk)
+            remaining -= chunk_tokens
+            continue
+
+        if not kept:
+            target_chars = max(1, int(max_tokens * 4 * 0.95))
+            kept.append(chunk[:target_chars].rstrip() + "…")
+        break
+
+    trimmed = separator.join(kept).strip()
+    if not trimmed:
+        target_chars = max(1, int(max_tokens * 4 * 0.95))
+        trimmed = content[:target_chars].rstrip() + "…"
+    return trimmed, original_tokens, True
+
+
+def _memory_budget_for_message(message: str) -> tuple[int, bool]:
+    config = get_memory_config()
+    configured_budget = max(1, int(config.max_injection_tokens))
+    simple_turn = _is_simple_turn(message)
+    if simple_turn:
+        return min(configured_budget, SIMPLE_TURN_MEMORY_BUDGET_TOKENS), True
+    return configured_budget, False
+
+
 def _build_memories_section_data(message: str, user_id: str = "daniel", skills_loaded: bool = False) -> dict[str, Any] | None:
     """Build relevant memories section using Hindsight recall retrieval."""
     try:
@@ -175,13 +258,24 @@ def _build_memories_section_data(message: str, user_id: str = "daniel", skills_l
         content = (payload.get("content") or "").strip()
         if not content:
             return None
+
+        budget_tokens, simple_turn = _memory_budget_for_message(message)
+        trimmed_content, original_tokens, truncated = _truncate_memory_content(content, budget_tokens)
+        if not trimmed_content:
+            return None
+
         return {
-            "content": content,
+            "content": trimmed_content,
             "query": payload.get("query", message),
             "limit": payload.get("limit", num_results),
             "result_count": payload.get("result_count", 0),
             "trace_available": payload.get("trace_available", False),
             "trace_preview": payload.get("trace_preview"),
+            "configured_budget_tokens": get_memory_config().max_injection_tokens,
+            "applied_budget_tokens": budget_tokens,
+            "original_approx_tokens": original_tokens,
+            "truncated": truncated,
+            "simple_turn_budget_applied": simple_turn,
         }
     except Exception as e:
         logger.warning(f"Failed to build memories section: {e}")
@@ -234,6 +328,11 @@ def assemble_context_details(message: str, user_id: str = "daniel", skills_loade
                 recall_result_count=mems["result_count"],
                 trace_available=mems["trace_available"],
                 trace_preview=mems.get("trace_preview"),
+                configured_budget_tokens=mems.get("configured_budget_tokens"),
+                applied_budget_tokens=mems.get("applied_budget_tokens"),
+                original_approx_tokens=mems.get("original_approx_tokens"),
+                truncated=mems.get("truncated"),
+                simple_turn_budget_applied=mems.get("simple_turn_budget_applied"),
             )
         )
 
